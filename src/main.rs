@@ -21,11 +21,20 @@ struct Opt {
     #[structopt(short = "n", long = "node")]
     node: SocketAddr,
 
-    #[structopt(long = "slow")]
-    slow: bool,
-
     #[structopt(long, default_value = "")]
     miner_token: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+struct Share {
+    pub_key: String,
+    nonce: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+struct Job {
+    puzzle: Request,
+    shares: Vec<Share>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -46,7 +55,6 @@ fn process_request(
     context: Arc<Mutex<MinerContext>>,
     mut request: tiny_http::Request,
     opt: &Opt,
-    sol_send: std::sync::mpsc::Sender<Solution>,
 ) -> Result<(), Box<dyn Error>> {
     match request.url() {
         "/miner/puzzle" => {
@@ -90,8 +98,6 @@ fn new_puzzle(
 struct MinerContext {
     hasher_context: Option<Arc<rust_randomx::Context>>,
     current_puzzle: RequestWrapper,
-    puzzle_id: u32,
-    worker_id: u32,
 }
 
 fn main() {
@@ -110,12 +116,9 @@ fn main() {
     let context = Arc::new(Mutex::new(MinerContext {
         current_puzzle: RequestWrapper { puzzle: None },
         hasher_context: None,
-        puzzle_id: 0,
-        worker_id: 0,
     }));
 
     let solution_getter = {
-        let ctx = Arc::clone(&context);
         let opt = opt.clone();
         thread::spawn(move || {
             for sol in sol_recv {
@@ -156,7 +159,7 @@ fn main() {
     };
 
     for request in server.incoming_requests() {
-        if let Err(e) = process_request(context.clone(), request, &opt, sol_send.clone()) {
+        if let Err(e) = process_request(context.clone(), request, &opt) {
             log::error!("Error: {}", e);
         }
     }
