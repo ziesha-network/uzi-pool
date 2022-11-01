@@ -8,19 +8,16 @@ use std::thread;
 use structopt::StructOpt;
 use tiny_http::{Response, Server};
 
-const WEBHOOK: &'static str = "127.0.0.1:3000";
+const WEBHOOK: &'static str = "127.0.0.1:8766";
 
-#[derive(Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct Solution {
-    pub nonce: Vec<u8>,
+    pub nonce: String,
 }
 
 #[derive(Debug, StructOpt, Clone)]
 #[structopt(name = "Uzi Pool", about = "Mine Zeeka with Uzi!")]
 struct Opt {
-    #[structopt(short = "t", long = "threads", default_value = "1")]
-    threads: usize,
-
     #[structopt(short = "n", long = "node")]
     node: SocketAddr,
 
@@ -49,48 +46,50 @@ fn process_request(
     context: Arc<Mutex<MinerContext>>,
     mut request: tiny_http::Request,
     opt: &Opt,
-    sol_send: std::sync::mpsc::Sender<miner::Solution>,
+    sol_send: std::sync::mpsc::Sender<Solution>,
 ) -> Result<(), Box<dyn Error>> {
-    // Parse request
-    let req: RequestWrapper = {
-        let mut content = String::new();
-        request.as_reader().read_to_string(&mut content)?;
-        serde_json::from_str(&content)?
-    };
+    match request.url() {
+        "/miner/puzzle" => {
+            request.respond(Response::from_string(
+                serde_json::to_string(&context.lock().unwrap().current_puzzle).unwrap(),
+            ))?;
+        }
+        "/miner/solution" => {
+            let sol: Solution = {
+                let mut content = String::new();
+                request.as_reader().read_to_string(&mut content)?;
+                serde_json::from_str(&content)?
+            };
+            ureq::post(&format!("http://{}/miner/solution", opt.node))
+                .set("X-ZEEKA-MINER-TOKEN", &opt.miner_token)
+                .send_json(json!({ "nonce": sol.nonce }))?;
+            request.respond(Response::from_string("OK"))?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
 
-    let mut ctx = context.lock().unwrap();
-    ctx.current_puzzle = Some(req.clone());
-
-    if let Some(req) = req.puzzle {
+fn new_puzzle(
+    context: Arc<Mutex<MinerContext>>,
+    request: RequestWrapper,
+) -> Result<(), Box<dyn Error>> {
+    if let Some(req) = &request.puzzle {
         let power = rust_randomx::Difficulty::new(req.target).power();
         println!(
             "{} Approximately {} hashes need to be calculated...",
             "Got new puzzle!".bright_yellow(),
             power
         );
-
-        request.respond(Response::from_string("\"OK\""))?;
-
-        ctx.puzzle_id += 1;
-    } else {
-        println!(
-            "{} Suspending the workers...",
-            "No puzzles available!".bright_yellow()
-        );
-
-        // Suspend all workers
-        ctx.workers
-            .retain(|w| w.send(miner::Message::Break).is_ok());
-
-        request.respond(Response::from_string("\"OK\""))?;
     }
+    context.lock().unwrap().current_puzzle = request;
+
     Ok(())
 }
 
 struct MinerContext {
     hasher_context: Option<Arc<rust_randomx::Context>>,
-    current_puzzle: Option<RequestWrapper>,
-    workers: Vec<miner::Worker>,
+    current_puzzle: RequestWrapper,
     puzzle_id: u32,
     worker_id: u32,
 }
@@ -107,10 +106,9 @@ fn main() {
 
     let server = Server::http(WEBHOOK).unwrap();
 
-    let (sol_send, sol_recv) = std::sync::mpsc::channel::<miner::Solution>();
+    let (sol_send, sol_recv) = std::sync::mpsc::channel::<Solution>();
     let context = Arc::new(Mutex::new(MinerContext {
-        workers: Vec::new(),
-        current_puzzle: None,
+        current_puzzle: RequestWrapper { puzzle: None },
         hasher_context: None,
         puzzle_id: 0,
         worker_id: 0,
@@ -123,9 +121,7 @@ fn main() {
             for sol in sol_recv {
                 if let Err(e) = || -> Result<(), Box<dyn Error>> {
                     println!("{}", "Solution found!".bright_green());
-                    ctx.lock()?
-                        .workers
-                        .retain(|w| w.send(miner::Message::Break).is_ok());
+                    // TODO: Tell all miners to stop
                     ureq::post(&format!("http://{}/miner/solution", opt.node))
                         .set("X-ZEEKA-MINER-TOKEN", &opt.miner_token)
                         .send_json(json!({ "nonce": hex::encode(sol.nonce) }))?;
@@ -148,8 +144,8 @@ fn main() {
                     .into_string()?;
 
                 let pzl_json: RequestWrapper = serde_json::from_str(&pzl)?;
-                if ctx.lock()?.current_puzzle != Some(pzl_json.clone()) {
-                    ureq::post(&format!("http://{}", WEBHOOK)).send_json(pzl_json)?;
+                if ctx.lock()?.current_puzzle != pzl_json.clone() {
+                    new_puzzle(ctx.clone(), pzl_json)?;
                 }
                 Ok(())
             }() {
@@ -165,11 +161,6 @@ fn main() {
         }
     }
 
-    if let Ok(ctx) = Arc::try_unwrap(context) {
-        for mut w in ctx.into_inner().unwrap().workers {
-            w.terminate().unwrap();
-        }
-    }
     drop(sol_send);
     solution_getter.join().unwrap();
     puzzle_getter.join().unwrap();
