@@ -112,29 +112,10 @@ fn main() {
 
     let server = Server::http(WEBHOOK).unwrap();
 
-    let (sol_send, sol_recv) = std::sync::mpsc::channel::<Solution>();
     let context = Arc::new(Mutex::new(MinerContext {
         current_puzzle: RequestWrapper { puzzle: None },
         hasher_context: None,
     }));
-
-    let solution_getter = {
-        let opt = opt.clone();
-        thread::spawn(move || {
-            for sol in sol_recv {
-                if let Err(e) = || -> Result<(), Box<dyn Error>> {
-                    println!("{}", "Solution found!".bright_green());
-                    // TODO: Tell all miners to stop
-                    ureq::post(&format!("http://{}/miner/solution", opt.node))
-                        .set("X-ZEEKA-MINER-TOKEN", &opt.miner_token)
-                        .send_json(json!({ "nonce": hex::encode(sol.nonce) }))?;
-                    Ok(())
-                }() {
-                    log::error!("Error: {}", e);
-                }
-            }
-        })
-    };
 
     let puzzle_getter = {
         let ctx = Arc::clone(&context);
@@ -164,7 +145,5 @@ fn main() {
         }
     }
 
-    drop(sol_send);
-    solution_getter.join().unwrap();
     puzzle_getter.join().unwrap();
 }
