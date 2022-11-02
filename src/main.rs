@@ -56,10 +56,11 @@ fn process_request(
     mut request: tiny_http::Request,
     opt: &Opt,
 ) -> Result<(), Box<dyn Error>> {
+    let ctx = context.lock().unwrap();
     match request.url() {
         "/miner/puzzle" => {
             request.respond(Response::from_string(
-                serde_json::to_string(&context.lock().unwrap().current_puzzle).unwrap(),
+                serde_json::to_string(&ctx.current_puzzle).unwrap(),
             ))?;
         }
         "/miner/solution" => {
@@ -80,17 +81,30 @@ fn process_request(
 
 fn new_puzzle(
     context: Arc<Mutex<MinerContext>>,
-    request: RequestWrapper,
+    mut request: RequestWrapper,
 ) -> Result<(), Box<dyn Error>> {
-    if let Some(req) = &request.puzzle {
-        let power = rust_randomx::Difficulty::new(req.target).power();
+    let mut ctx = context.lock().unwrap();
+    if let Some(req) = &mut request.puzzle {
+        let req_key = hex::decode(&req.key)?;
+
+        if ctx
+            .hasher_context
+            .as_ref()
+            .map(|ctx| ctx.key() != req_key)
+            .unwrap_or(true)
+        {
+            ctx.hasher_context = Some(Arc::new(rust_randomx::Context::new(&req_key, false)));
+        }
+
+        let target = rust_randomx::Difficulty::new(req.target);
         println!(
             "{} Approximately {} hashes need to be calculated...",
             "Got new puzzle!".bright_yellow(),
-            power
+            target.power()
         );
+        req.target = target.scale(0.1).to_u32();
     }
-    context.lock().unwrap().current_puzzle = request;
+    ctx.current_puzzle = request;
 
     Ok(())
 }
