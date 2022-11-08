@@ -17,3 +17,5 @@ ureq = { version = "2.4.0", features = ["json"], default-features = false }
 colored = "2.0.0"
 log = "0.4"
 env_logger = "0.9.0"
+bazuka = { git = "https://github.com/zeeka-network/bazuka", default_features = false }
+home = "0.5.3"

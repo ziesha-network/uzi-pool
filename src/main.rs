@@ -1,3 +1,5 @@
+use bazuka::core::{Address, Money, RegularSendEntry, TransactionAndDelta};
+use bazuka::wallet::{TxBuilder, Wallet};
 use colored::Colorize;
 use rust_randomx::{Context, Hasher};
 use serde::{Deserialize, Serialize};
@@ -5,6 +7,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::error::Error;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use structopt::StructOpt;
@@ -62,8 +65,22 @@ struct PuzzleWrapper {
     puzzle: Option<Puzzle>,
 }
 
-fn job_solved(shares: &[Share]) {
-    println!("{:?}", shares);
+fn job_solved(
+    tx_builder: TxBuilder,
+    nonce: u32,
+    total_reward: Money,
+    shares: &[Share],
+) -> TransactionAndDelta {
+    let per_share_reward: Money = (Into::<u64>::into(total_reward) / (shares.len() as u64)).into();
+    let mut rewards: HashMap<Address, Money> = HashMap::new();
+    for share in shares {
+        *rewards.entry(share.miner.pub_key.clone()).or_default() += per_share_reward;
+    }
+    let entries: Vec<RegularSendEntry> = rewards
+        .into_iter()
+        .map(|(k, v)| RegularSendEntry { dst: k, amount: v })
+        .collect();
+    tx_builder.create_multi_transaction(entries, 0.into(), nonce)
 }
 
 fn fetch_miner_token(req: &tiny_http::Request) -> Option<String> {
@@ -114,6 +131,7 @@ fn process_request(
 
             let mut block_solved = false;
             let hasher = Hasher::new(ctx.hasher.clone());
+            let tx_builder = ctx.tx_builder.clone();
             if let Some(current_job) = ctx.current_job.as_mut() {
                 let easy_puzzle = {
                     let mut new_pzl = current_job.puzzle.clone();
@@ -139,7 +157,7 @@ fn process_request(
                         current_job.shares.remove(0);
                     }
                     if out.meets_difficulty(block_diff) {
-                        job_solved(&current_job.shares);
+                        job_solved(tx_builder, 0, 0u64.into(), &current_job.shares);
                         block_solved = true;
 
                         println!("{} {}", "Solution found by:".bright_green(), miner.token);
@@ -195,10 +213,11 @@ fn new_puzzle(context: Arc<Mutex<MinerContext>>, req: PuzzleWrapper) -> Result<(
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 struct Miner {
     token: String,
-    pub_key: String,
+    pub_key: Address,
 }
 
 struct MinerContext {
+    tx_builder: TxBuilder,
     miners: HashMap<String, Miner>,
     hasher: Arc<Context>,
     current_job: Option<Job>,
@@ -211,6 +230,12 @@ fn main() {
         env!("CARGO_PKG_VERSION")
     );
 
+    let wallet_path = home::home_dir().unwrap().join(Path::new(".bazuka-wallet"));
+    let wallet = Wallet::open(wallet_path.clone())
+        .unwrap()
+        .expect("Wallet is not initialized!");
+    let tx_builder = TxBuilder::new(&wallet.seed());
+
     env_logger::init();
     let opt = Opt::from_args();
     println!("{} {}", "Listening to:".bright_yellow(), opt.listen);
@@ -218,9 +243,12 @@ fn main() {
     let server = Server::http(opt.listen).unwrap();
 
     let context = Arc::new(Mutex::new(MinerContext {
+        tx_builder,
         miners: [Miner {
             token: "haha".into(),
-            pub_key: "hehe".into(),
+            pub_key: "0xc8883cc5e8c9f3eaa50fb50363b2f8ec8a044ed59241b4a87ad9f97cddacf5a6"
+                .parse()
+                .unwrap(),
         }]
         .into_iter()
         .map(|m| (m.token.clone(), m))
