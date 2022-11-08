@@ -1,4 +1,5 @@
 use colored::Colorize;
+use rust_randomx::{Context, Hasher};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::error::Error;
@@ -26,6 +27,12 @@ struct Opt {
 
     #[structopt(long, default_value = "")]
     miner_token: String,
+
+    #[structopt(long, default_value = "10")]
+    share_easiness: usize,
+
+    #[structopt(long, default_value = "10")]
+    share_capacity: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -59,11 +66,19 @@ fn process_request(
     mut request: tiny_http::Request,
     opt: &Opt,
 ) -> Result<(), Box<dyn Error>> {
-    let ctx = context.lock().unwrap();
+    let mut ctx = context.lock().unwrap();
+
+    let mut easy_puzzle = ctx.current_puzzle.clone();
+    easy_puzzle.puzzle.as_mut().map(|mut p| {
+        p.target = rust_randomx::Difficulty::new(p.target)
+            .scale(1f32 / (opt.share_easiness as f32))
+            .to_u32()
+    });
+
     match request.url() {
         "/miner/puzzle" => {
             request.respond(Response::from_string(
-                serde_json::to_string(&ctx.current_puzzle).unwrap(),
+                serde_json::to_string(&easy_puzzle).unwrap(),
             ))?;
         }
         "/miner/solution" => {
@@ -72,10 +87,30 @@ fn process_request(
                 request.as_reader().read_to_string(&mut content)?;
                 serde_json::from_str(&content)?
             };
-            ureq::post(&format!("http://{}/miner/solution", opt.node))
-                .set("X-ZEEKA-MINER-TOKEN", &opt.miner_token)
-                .send_json(json!({ "nonce": sol.nonce }))?;
-            request.respond(Response::from_string("OK"))?;
+
+            if let Some((block_puzzle, puzzle)) =
+                ctx.current_puzzle.puzzle.as_ref().zip(easy_puzzle.puzzle)
+            {
+                let block_diff = rust_randomx::Difficulty::new(block_puzzle.target);
+                let share_diff = rust_randomx::Difficulty::new(puzzle.target);
+                let mut blob = hex::decode(puzzle.blob)?;
+                let (b, e) = (puzzle.offset, puzzle.offset + puzzle.size);
+                blob[b..e].copy_from_slice(&hex::decode(&sol.nonce)?);
+                let out = ctx.hasher.hash(&blob);
+
+                if out.meets_difficulty(share_diff) {
+                    if out.meets_difficulty(block_diff) {
+                        ctx.current_puzzle.puzzle = None;
+                        println!("{} {}", "Solution found by:".bright_green(), "");
+                        ureq::post(&format!("http://{}/miner/solution", opt.node))
+                            .set("X-ZEEKA-MINER-TOKEN", &opt.miner_token)
+                            .send_json(json!({ "nonce": sol.nonce }))?;
+                    } else {
+                        println!("{} {}", "Share found by:".bright_green(), "");
+                    }
+                    request.respond(Response::from_string("OK"))?;
+                }
+            }
         }
         _ => {}
     }
@@ -84,19 +119,16 @@ fn process_request(
 
 fn new_puzzle(
     context: Arc<Mutex<MinerContext>>,
-    mut request: RequestWrapper,
+    request: RequestWrapper,
 ) -> Result<(), Box<dyn Error>> {
     let mut ctx = context.lock().unwrap();
-    if let Some(req) = &mut request.puzzle {
+    ctx.current_puzzle = request.clone();
+    if let Some(req) = &request.puzzle {
         let req_key = hex::decode(&req.key)?;
 
-        if ctx
-            .hasher_context
-            .as_ref()
-            .map(|ctx| ctx.key() != req_key)
-            .unwrap_or(true)
-        {
-            ctx.hasher_context = Some(Arc::new(rust_randomx::Context::new(&req_key, false)));
+        if ctx.hasher.context().key() != req_key {
+            println!("{}", "Initializing hasher...".bright_yellow());
+            ctx.hasher = Hasher::new(Arc::new(rust_randomx::Context::new(&req_key, false)));
         }
 
         let target = rust_randomx::Difficulty::new(req.target);
@@ -105,15 +137,13 @@ fn new_puzzle(
             "Got new puzzle!".bright_yellow(),
             target.power()
         );
-        req.target = target.scale(0.1).to_u32();
     }
-    ctx.current_puzzle = request;
 
     Ok(())
 }
 
 struct MinerContext {
-    hasher_context: Option<Arc<rust_randomx::Context>>,
+    hasher: rust_randomx::Hasher,
     current_puzzle: RequestWrapper,
 }
 
@@ -132,7 +162,7 @@ fn main() {
 
     let context = Arc::new(Mutex::new(MinerContext {
         current_puzzle: RequestWrapper { puzzle: None },
-        hasher_context: None,
+        hasher: Hasher::new(Arc::new(Context::new(b"", false))),
     }));
 
     let puzzle_getter = {
