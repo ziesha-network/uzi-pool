@@ -65,12 +65,9 @@ struct PuzzleWrapper {
     puzzle: Option<Puzzle>,
 }
 
-fn job_solved(
-    tx_builder: TxBuilder,
-    nonce: u32,
-    total_reward: Money,
-    shares: &[Share],
-) -> TransactionAndDelta {
+fn job_solved(total_reward: Money, shares: &[Share]) -> TransactionAndDelta {
+    let mut wallet = get_wallet();
+    let tx_builder = TxBuilder::new(&wallet.seed());
     let per_share_reward: Money = (Into::<u64>::into(total_reward) / (shares.len() as u64)).into();
     let mut rewards: HashMap<Address, Money> = HashMap::new();
     for share in shares {
@@ -80,7 +77,11 @@ fn job_solved(
         .into_iter()
         .map(|(k, v)| RegularSendEntry { dst: k, amount: v })
         .collect();
-    tx_builder.create_multi_transaction(entries, 0.into(), nonce)
+    let tx =
+        tx_builder.create_multi_transaction(entries, 0.into(), wallet.new_r_nonce().unwrap_or(0));
+    wallet.add_rsend(tx.clone());
+    save_wallet(&wallet);
+    tx
 }
 
 fn fetch_miner_token(req: &tiny_http::Request) -> Option<String> {
@@ -131,7 +132,6 @@ fn process_request(
 
             let mut block_solved = false;
             let hasher = Hasher::new(ctx.hasher.clone());
-            let tx_builder = ctx.tx_builder.clone();
             if let Some(current_job) = ctx.current_job.as_mut() {
                 let easy_puzzle = {
                     let mut new_pzl = current_job.puzzle.clone();
@@ -157,7 +157,7 @@ fn process_request(
                         current_job.shares.remove(0);
                     }
                     if out.meets_difficulty(block_diff) {
-                        job_solved(tx_builder, 0, 0u64.into(), &current_job.shares);
+                        job_solved(0u64.into(), &current_job.shares);
                         block_solved = true;
 
                         println!("{} {}", "Solution found by:".bright_green(), miner.token);
@@ -217,10 +217,21 @@ struct Miner {
 }
 
 struct MinerContext {
-    tx_builder: TxBuilder,
     miners: HashMap<String, Miner>,
     hasher: Arc<Context>,
     current_job: Option<Job>,
+}
+
+fn get_wallet() -> Wallet {
+    let wallet_path = home::home_dir().unwrap().join(Path::new(".bazuka-wallet"));
+    Wallet::open(wallet_path.clone())
+        .unwrap()
+        .expect("Wallet is not initialized!")
+}
+
+fn save_wallet(w: &Wallet) {
+    let wallet_path = home::home_dir().unwrap().join(Path::new(".bazuka-wallet"));
+    w.save(wallet_path).unwrap();
 }
 
 fn main() {
@@ -230,12 +241,6 @@ fn main() {
         env!("CARGO_PKG_VERSION")
     );
 
-    let wallet_path = home::home_dir().unwrap().join(Path::new(".bazuka-wallet"));
-    let wallet = Wallet::open(wallet_path.clone())
-        .unwrap()
-        .expect("Wallet is not initialized!");
-    let tx_builder = TxBuilder::new(&wallet.seed());
-
     env_logger::init();
     let opt = Opt::from_args();
     println!("{} {}", "Listening to:".bright_yellow(), opt.listen);
@@ -243,7 +248,6 @@ fn main() {
     let server = Server::http(opt.listen).unwrap();
 
     let context = Arc::new(Mutex::new(MinerContext {
-        tx_builder,
         miners: [Miner {
             token: "haha".into(),
             pub_key: "0xc8883cc5e8c9f3eaa50fb50363b2f8ec8a044ed59241b4a87ad9f97cddacf5a6"
