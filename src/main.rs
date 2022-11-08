@@ -2,6 +2,7 @@ use colored::Colorize;
 use rust_randomx::{Context, Hasher};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -37,18 +38,18 @@ struct Opt {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 struct Share {
-    pub_key: String,
+    miner: Miner,
     nonce: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 struct Job {
-    puzzle: Request,
+    puzzle: Puzzle,
     shares: Vec<Share>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-struct Request {
+struct Puzzle {
     key: String,
     blob: String,
     offset: usize,
@@ -57,8 +58,21 @@ struct Request {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-struct RequestWrapper {
-    puzzle: Option<Request>,
+struct PuzzleWrapper {
+    puzzle: Option<Puzzle>,
+}
+
+fn job_solved(shares: &[Share]) {
+    println!("{:?}", shares);
+}
+
+fn fetch_miner_token(req: &tiny_http::Request) -> Option<String> {
+    for h in req.headers() {
+        if h.field.equiv("X-ZEEKA-MINER-TOKEN") {
+            return Some(h.value.clone().into());
+        }
+    }
+    None
 }
 
 fn process_request(
@@ -68,17 +82,27 @@ fn process_request(
 ) -> Result<(), Box<dyn Error>> {
     let mut ctx = context.lock().unwrap();
 
-    let mut easy_puzzle = ctx.current_puzzle.clone();
-    easy_puzzle.puzzle.as_mut().map(|mut p| {
-        p.target = rust_randomx::Difficulty::new(p.target)
-            .scale(1f32 / (opt.share_easiness as f32))
-            .to_u32()
-    });
+    let miner =
+        if let Some(Some(miner)) = fetch_miner_token(&request).map(|tkn| ctx.miners.get(&tkn)) {
+            miner.clone()
+        } else {
+            return Err(Box::<dyn Error>::from("Miner not authorized!".to_string()));
+        };
 
     match request.url() {
         "/miner/puzzle" => {
+            let easy_puzzle = ctx.current_job.as_ref().map(|j| {
+                let mut new_pzl = j.puzzle.clone();
+                new_pzl.target = rust_randomx::Difficulty::new(new_pzl.target)
+                    .scale(1f32 / (opt.share_easiness as f32))
+                    .to_u32();
+                new_pzl
+            });
             request.respond(Response::from_string(
-                serde_json::to_string(&easy_puzzle).unwrap(),
+                serde_json::to_string(&PuzzleWrapper {
+                    puzzle: easy_puzzle.clone(),
+                })
+                .unwrap(),
             ))?;
         }
         "/miner/solution" => {
@@ -88,28 +112,48 @@ fn process_request(
                 serde_json::from_str(&content)?
             };
 
-            if let Some((block_puzzle, puzzle)) =
-                ctx.current_puzzle.puzzle.as_ref().zip(easy_puzzle.puzzle)
-            {
-                let block_diff = rust_randomx::Difficulty::new(block_puzzle.target);
-                let share_diff = rust_randomx::Difficulty::new(puzzle.target);
-                let mut blob = hex::decode(puzzle.blob)?;
-                let (b, e) = (puzzle.offset, puzzle.offset + puzzle.size);
+            let mut block_solved = false;
+            let hasher = Hasher::new(ctx.hasher.clone());
+            if let Some(current_job) = ctx.current_job.as_mut() {
+                let easy_puzzle = {
+                    let mut new_pzl = current_job.puzzle.clone();
+                    new_pzl.target = rust_randomx::Difficulty::new(new_pzl.target)
+                        .scale(1f32 / (opt.share_easiness as f32))
+                        .to_u32();
+                    new_pzl
+                };
+
+                let block_diff = rust_randomx::Difficulty::new(current_job.puzzle.target);
+                let share_diff = rust_randomx::Difficulty::new(easy_puzzle.target);
+                let mut blob = hex::decode(easy_puzzle.blob.clone())?;
+                let (b, e) = (easy_puzzle.offset, easy_puzzle.offset + easy_puzzle.size);
                 blob[b..e].copy_from_slice(&hex::decode(&sol.nonce)?);
-                let out = ctx.hasher.hash(&blob);
+                let out = hasher.hash(&blob);
 
                 if out.meets_difficulty(share_diff) {
+                    current_job.shares.push(Share {
+                        miner: miner.clone(),
+                        nonce: sol.nonce.clone(),
+                    });
+                    while current_job.shares.len() > opt.share_capacity {
+                        current_job.shares.remove(0);
+                    }
                     if out.meets_difficulty(block_diff) {
-                        ctx.current_puzzle.puzzle = None;
-                        println!("{} {}", "Solution found by:".bright_green(), "");
+                        job_solved(&current_job.shares);
+                        block_solved = true;
+
+                        println!("{} {}", "Solution found by:".bright_green(), miner.token);
                         ureq::post(&format!("http://{}/miner/solution", opt.node))
                             .set("X-ZEEKA-MINER-TOKEN", &opt.miner_token)
                             .send_json(json!({ "nonce": sol.nonce }))?;
                     } else {
-                        println!("{} {}", "Share found by:".bright_green(), "");
+                        println!("{} {}", "Share found by:".bright_green(), miner.token);
                     }
                     request.respond(Response::from_string("OK"))?;
                 }
+            }
+            if block_solved {
+                ctx.current_job = None;
             }
         }
         _ => {}
@@ -117,18 +161,21 @@ fn process_request(
     Ok(())
 }
 
-fn new_puzzle(
-    context: Arc<Mutex<MinerContext>>,
-    request: RequestWrapper,
-) -> Result<(), Box<dyn Error>> {
+fn new_puzzle(context: Arc<Mutex<MinerContext>>, req: PuzzleWrapper) -> Result<(), Box<dyn Error>> {
     let mut ctx = context.lock().unwrap();
-    ctx.current_puzzle = request.clone();
-    if let Some(req) = &request.puzzle {
+    if ctx.current_job.as_ref().map(|j| j.puzzle.clone()) == req.puzzle {
+        return Ok(());
+    }
+    if let Some(req) = req.puzzle.clone() {
+        ctx.current_job = Some(Job {
+            puzzle: req.clone(),
+            shares: vec![],
+        });
         let req_key = hex::decode(&req.key)?;
 
-        if ctx.hasher.context().key() != req_key {
+        if ctx.hasher.key() != req_key {
             println!("{}", "Initializing hasher...".bright_yellow());
-            ctx.hasher = Hasher::new(Arc::new(rust_randomx::Context::new(&req_key, false)));
+            ctx.hasher = Arc::new(Context::new(&req_key, false));
         }
 
         let target = rust_randomx::Difficulty::new(req.target);
@@ -137,14 +184,24 @@ fn new_puzzle(
             "Got new puzzle!".bright_yellow(),
             target.power()
         );
+    } else {
+        ctx.current_job = None;
+        println!("No puzzles to mine...");
     }
 
     Ok(())
 }
 
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+struct Miner {
+    token: String,
+    pub_key: String,
+}
+
 struct MinerContext {
-    hasher: rust_randomx::Hasher,
-    current_puzzle: RequestWrapper,
+    miners: HashMap<String, Miner>,
+    hasher: Arc<Context>,
+    current_job: Option<Job>,
 }
 
 fn main() {
@@ -161,8 +218,15 @@ fn main() {
     let server = Server::http(opt.listen).unwrap();
 
     let context = Arc::new(Mutex::new(MinerContext {
-        current_puzzle: RequestWrapper { puzzle: None },
-        hasher: Hasher::new(Arc::new(Context::new(b"", false))),
+        miners: [Miner {
+            token: "haha".into(),
+            pub_key: "hehe".into(),
+        }]
+        .into_iter()
+        .map(|m| (m.token.clone(), m))
+        .collect(),
+        current_job: None,
+        hasher: Arc::new(Context::new(b"", false)),
     }));
 
     let puzzle_getter = {
@@ -175,10 +239,8 @@ fn main() {
                     .call()?
                     .into_string()?;
 
-                let pzl_json: RequestWrapper = serde_json::from_str(&pzl)?;
-                if ctx.lock()?.current_puzzle != pzl_json.clone() {
-                    new_puzzle(ctx.clone(), pzl_json)?;
-                }
+                let pzl_json: PuzzleWrapper = serde_json::from_str(&pzl)?;
+                new_puzzle(ctx.clone(), pzl_json)?;
                 Ok(())
             }() {
                 log::error!("Error: {}", e);
