@@ -8,7 +8,7 @@ use std::thread;
 use structopt::StructOpt;
 use tiny_http::{Response, Server};
 
-const WEBHOOK: &'static str = "127.0.0.1:8766";
+const LISTEN: &'static str = "0.0.0.0:8766";
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct Solution {
@@ -20,6 +20,9 @@ pub struct Solution {
 struct Opt {
     #[structopt(short = "n", long = "node")]
     node: SocketAddr,
+
+    #[structopt(long, default_value = LISTEN)]
+    listen: SocketAddr,
 
     #[structopt(long, default_value = "")]
     miner_token: String,
@@ -123,8 +126,9 @@ fn main() {
 
     env_logger::init();
     let opt = Opt::from_args();
+    println!("{} {}", "Listening to:".bright_yellow(), opt.listen);
 
-    let server = Server::http(WEBHOOK).unwrap();
+    let server = Server::http(opt.listen).unwrap();
 
     let context = Arc::new(Mutex::new(MinerContext {
         current_puzzle: RequestWrapper { puzzle: None },
