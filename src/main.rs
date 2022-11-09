@@ -133,11 +133,16 @@ fn process_request(
             if !request.remote_addr().ip().is_loopback() {
                 request.respond(Response::from_string("ERR"))?;
             } else {
-                let resp: HashMap<String, String> = miners
+                let miners: HashMap<String, String> = miners
                     .into_iter()
                     .map(|(k, v)| (k, v.pub_key.to_string()))
                     .collect();
-                request.respond(Response::from_string(serde_json::to_string(&resp).unwrap()))?;
+                let mut resp = Response::from_string(serde_json::to_string(&miners).unwrap());
+                resp.add_header(
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                        .unwrap(),
+                );
+                request.respond(resp)?;
             }
         }
         "/add-miner" => {
