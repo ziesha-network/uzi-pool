@@ -1,4 +1,4 @@
-use crate::ZoroError;
+use std::error::Error;
 use std::future::Future;
 
 #[derive(Clone)]
@@ -21,12 +21,12 @@ impl SyncClient {
     }
     fn call<
         R,
-        Fut: Future<Output = Result<R, ZoroError>>,
+        Fut: Future<Output = Result<R, Box<dyn Error>>>,
         F: FnOnce(bazuka::client::BazukaClient) -> Fut,
     >(
         &self,
         f: F,
-    ) -> Result<R, ZoroError> {
+    ) -> Result<R, Box<dyn Error>> {
         Ok(tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
@@ -49,13 +49,13 @@ impl SyncClient {
     pub fn transact(
         &self,
         tx: bazuka::core::TransactionAndDelta,
-    ) -> Result<bazuka::client::messages::TransactResponse, ZoroError> {
+    ) -> Result<bazuka::client::messages::TransactResponse, Box<dyn Error>> {
         self.call(move |client| async move { Ok(client.transact(tx).await?) })
     }
     pub fn get_account(
         &self,
         address: bazuka::core::Address,
-    ) -> Result<bazuka::client::messages::GetAccountResponse, ZoroError> {
+    ) -> Result<bazuka::client::messages::GetAccountResponse, Box<dyn Error>> {
         self.call(move |client| async move { Ok(client.get_account(address).await?) })
     }
 }

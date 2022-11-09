@@ -1,5 +1,8 @@
-use bazuka::core::{Address, Money, RegularSendEntry, TransactionAndDelta};
+mod client;
+
+use bazuka::core::{Address, Header, Money, RegularSendEntry};
 use bazuka::wallet::{TxBuilder, Wallet};
+use client::SyncClient;
 use colored::Colorize;
 use rust_randomx::{Context, Hasher};
 use serde::{Deserialize, Serialize};
@@ -28,6 +31,9 @@ struct Opt {
 
     #[structopt(long, default_value = LISTEN)]
     listen: SocketAddr,
+
+    #[structopt(long, default_value = "mainnet")]
+    network: String,
 
     #[structopt(long, default_value = "")]
     miner_token: String,
@@ -58,6 +64,7 @@ struct Puzzle {
     offset: usize,
     size: usize,
     target: u32,
+    reward: Money,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -65,23 +72,21 @@ struct PuzzleWrapper {
     puzzle: Option<Puzzle>,
 }
 
-fn job_solved(total_reward: Money, shares: &[Share]) -> TransactionAndDelta {
-    let mut wallet = get_wallet();
-    let tx_builder = TxBuilder::new(&wallet.seed());
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+struct History {
+    solved: HashMap<Header, Vec<RegularSendEntry>>,
+}
+
+fn job_solved(total_reward: Money, shares: &[Share]) -> Vec<RegularSendEntry> {
     let per_share_reward: Money = (Into::<u64>::into(total_reward) / (shares.len() as u64)).into();
     let mut rewards: HashMap<Address, Money> = HashMap::new();
     for share in shares {
         *rewards.entry(share.miner.pub_key.clone()).or_default() += per_share_reward;
     }
-    let entries: Vec<RegularSendEntry> = rewards
+    rewards
         .into_iter()
         .map(|(k, v)| RegularSendEntry { dst: k, amount: v })
-        .collect();
-    let tx =
-        tx_builder.create_multi_transaction(entries, 0.into(), wallet.new_r_nonce().unwrap_or(0));
-    wallet.add_rsend(tx.clone());
-    save_wallet(&wallet);
-    tx
+        .collect()
 }
 
 fn fetch_miner_token(req: &tiny_http::Request) -> Option<String> {
@@ -130,7 +135,7 @@ fn process_request(
                 serde_json::from_str(&content)?
             };
 
-            let mut block_solved = false;
+            let mut block_solved: Option<(Header, Vec<RegularSendEntry>)> = None;
             let hasher = Hasher::new(ctx.hasher.clone());
             if let Some(current_job) = ctx.current_job.as_mut() {
                 let easy_puzzle = {
@@ -144,6 +149,7 @@ fn process_request(
                 let block_diff = rust_randomx::Difficulty::new(current_job.puzzle.target);
                 let share_diff = rust_randomx::Difficulty::new(easy_puzzle.target);
                 let mut blob = hex::decode(easy_puzzle.blob.clone())?;
+                let header: Header = bincode::deserialize(&blob)?;
                 let (b, e) = (easy_puzzle.offset, easy_puzzle.offset + easy_puzzle.size);
                 blob[b..e].copy_from_slice(&hex::decode(&sol.nonce)?);
                 let out = hasher.hash(&blob);
@@ -157,8 +163,10 @@ fn process_request(
                         current_job.shares.remove(0);
                     }
                     if out.meets_difficulty(block_diff) {
-                        job_solved(0u64.into(), &current_job.shares);
-                        block_solved = true;
+                        block_solved = Some((
+                            header,
+                            job_solved(current_job.puzzle.reward, &current_job.shares),
+                        ));
 
                         println!("{} {}", "Solution found by:".bright_green(), miner.token);
                         ureq::post(&format!("http://{}/miner/solution", opt.node))
@@ -170,7 +178,8 @@ fn process_request(
                     request.respond(Response::from_string("OK"))?;
                 }
             }
-            if block_solved {
+            if let Some((header, entries)) = block_solved {
+                ctx.history.insert(header, entries);
                 ctx.current_job = None;
             }
         }
@@ -217,21 +226,26 @@ struct Miner {
 }
 
 struct MinerContext {
+    history: HashMap<Header, Vec<RegularSendEntry>>,
+    client: SyncClient,
     miners: HashMap<String, Miner>,
     hasher: Arc<Context>,
     current_job: Option<Job>,
 }
 
-fn get_wallet() -> Wallet {
+fn send_tx(client: &SyncClient, entries: Vec<RegularSendEntry>) -> Result<(), Box<dyn Error>> {
     let wallet_path = home::home_dir().unwrap().join(Path::new(".bazuka-wallet"));
-    Wallet::open(wallet_path.clone())
+    let mut wallet = Wallet::open(wallet_path.clone())
         .unwrap()
-        .expect("Wallet is not initialized!")
-}
-
-fn save_wallet(w: &Wallet) {
-    let wallet_path = home::home_dir().unwrap().join(Path::new(".bazuka-wallet"));
-    w.save(wallet_path).unwrap();
+        .expect("Wallet is not initialized!");
+    let tx_builder = TxBuilder::new(&wallet.seed());
+    let curr_nonce = client.get_account(tx_builder.get_address())?.account.nonce;
+    let new_nonce = wallet.new_r_nonce().unwrap_or(curr_nonce + 1);
+    let tx = tx_builder.create_multi_transaction(entries, 0.into(), new_nonce);
+    client.transact(tx.clone())?;
+    wallet.add_rsend(tx);
+    wallet.save(wallet_path).unwrap();
+    Ok(())
 }
 
 fn main() {
@@ -246,14 +260,27 @@ fn main() {
     println!("{} {}", "Listening to:".bright_yellow(), opt.listen);
 
     let server = Server::http(opt.listen).unwrap();
-
     let context = Arc::new(Mutex::new(MinerContext {
-        miners: [Miner {
-            token: "haha".into(),
-            pub_key: "0xc8883cc5e8c9f3eaa50fb50363b2f8ec8a044ed59241b4a87ad9f97cddacf5a6"
-                .parse()
-                .unwrap(),
-        }]
+        history: HashMap::new(),
+        client: SyncClient::new(
+            bazuka::client::PeerAddress(opt.node),
+            &opt.network,
+            opt.miner_token.clone(),
+        ),
+        miners: [
+            Miner {
+                token: "haha".into(),
+                pub_key: "0xc8883cc5e8c9f3eaa50fb50363b2f8ec8a044ed59241b4a87ad9f97cddacf5a6"
+                    .parse()
+                    .unwrap(),
+            },
+            Miner {
+                token: "hehe".into(),
+                pub_key: "0xc8883cc5e8c9f3eaa50fb50363b2f8ec8a044ed59241b4a87ad9f97cddacf4a6"
+                    .parse()
+                    .unwrap(),
+            },
+        ]
         .into_iter()
         .map(|m| (m.token.clone(), m))
         .collect(),
@@ -281,6 +308,23 @@ fn main() {
         })
     };
 
+    let reward_sender = {
+        let ctx = Arc::clone(&context);
+        thread::spawn(move || loop {
+            if let Err(e) = || -> Result<(), Box<dyn Error>> {
+                let mut ctx = ctx.lock().unwrap();
+                for (h, entries) in ctx.history.clone() {
+                    send_tx(&ctx.client, entries)?;
+                    ctx.history.remove(&h);
+                }
+                Ok(())
+            }() {
+                log::error!("Error: {}", e);
+            }
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        })
+    };
+
     for request in server.incoming_requests() {
         if let Err(e) = process_request(context.clone(), request, &opt) {
             log::error!("Error: {}", e);
@@ -288,4 +332,5 @@ fn main() {
     }
 
     puzzle_getter.join().unwrap();
+    reward_sender.join().unwrap();
 }
