@@ -84,6 +84,11 @@ struct AddMinerRequest {
     pub_key: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+struct AddMinerResponse {
+    miner_token: String,
+}
+
 fn job_solved(total_reward: Money, shares: &[Share]) -> Vec<RegularSendEntry> {
     let per_share_reward: Money = (Into::<u64>::into(total_reward) / (shares.len() as u64)).into();
     let mut rewards: HashMap<Address, Money> = HashMap::new();
@@ -158,12 +163,20 @@ fn process_request(
                     serde_json::from_str(&content)?
                 };
                 let mut miners = miners.clone().into_values().collect::<Vec<Miner>>();
+                let miner_token = generate_miner_token();
                 miners.push(Miner {
                     pub_key: add_miner_req.pub_key.parse()?,
-                    token: generate_miner_token(),
+                    token: miner_token.clone(),
                 });
                 File::create(miners_path)?.write_all(&bincode::serialize(&miners)?)?;
-                request.respond(Response::from_string("OK"))?;
+                let mut resp = Response::from_string(
+                    serde_json::to_string(&AddMinerResponse { miner_token }).unwrap(),
+                );
+                resp.add_header(
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                        .unwrap(),
+                );
+                request.respond(resp)?;
             }
         }
         "/miner/puzzle" => {
