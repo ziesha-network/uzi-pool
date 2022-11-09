@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::error::Error;
+use std::fs::File;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -77,6 +79,11 @@ struct History {
     solved: HashMap<Header, Vec<RegularSendEntry>>,
 }
 
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+struct AddMinerRequest {
+    pub_key: String,
+}
+
 fn job_solved(total_reward: Money, shares: &[Share]) -> Vec<RegularSendEntry> {
     let per_share_reward: Money = (Into::<u64>::into(total_reward) / (shares.len() as u64)).into();
     let mut rewards: HashMap<Address, Money> = HashMap::new();
@@ -98,22 +105,67 @@ fn fetch_miner_token(req: &tiny_http::Request) -> Option<String> {
     None
 }
 
+fn generate_miner_token() -> String {
+    use rand::distributions::Alphanumeric;
+    use rand::{thread_rng, Rng};
+    thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(30)
+        .map(char::from)
+        .collect()
+}
+
 fn process_request(
     context: Arc<Mutex<MinerContext>>,
     mut request: tiny_http::Request,
     opt: &Opt,
 ) -> Result<(), Box<dyn Error>> {
     let mut ctx = context.lock().unwrap();
-
-    let miner =
-        if let Some(Some(miner)) = fetch_miner_token(&request).map(|tkn| ctx.miners.get(&tkn)) {
-            miner.clone()
-        } else {
-            return Err(Box::<dyn Error>::from("Miner not authorized!".to_string()));
-        };
+    let miners = get_miners()?;
+    let miner = if let Some(Some(miner)) = fetch_miner_token(&request).map(|tkn| miners.get(&tkn)) {
+        Some(miner.clone())
+    } else {
+        None
+    };
 
     match request.url() {
+        "/get-miners" => {
+            if !request.remote_addr().ip().is_loopback() {
+                request.respond(Response::from_string("ERR"))?;
+            } else {
+                let resp: HashMap<String, String> = miners
+                    .into_iter()
+                    .map(|(k, v)| (k, v.pub_key.to_string()))
+                    .collect();
+                request.respond(Response::from_string(serde_json::to_string(&resp).unwrap()))?;
+            }
+        }
+        "/add-miner" => {
+            if !request.remote_addr().ip().is_loopback() {
+                request.respond(Response::from_string("ERR"))?;
+            } else {
+                let miners_path = home::home_dir()
+                    .unwrap()
+                    .join(Path::new(".uzi-pool-miners"));
+                let add_miner_req: AddMinerRequest = {
+                    let mut content = String::new();
+                    request.as_reader().read_to_string(&mut content)?;
+                    serde_json::from_str(&content)?
+                };
+                let mut miners = miners.clone().into_values().collect::<Vec<Miner>>();
+                miners.push(Miner {
+                    pub_key: add_miner_req.pub_key.parse()?,
+                    token: generate_miner_token(),
+                });
+                File::create(miners_path)?.write_all(&bincode::serialize(&miners)?)?;
+                request.respond(Response::from_string("OK"))?;
+            }
+        }
         "/miner/puzzle" => {
+            if miner.is_none() {
+                return Err(Box::<dyn Error>::from("Miner not authorized!".to_string()));
+            };
+
             let easy_puzzle = ctx.current_job.as_ref().map(|j| {
                 let mut new_pzl = j.puzzle.clone();
                 new_pzl.target = rust_randomx::Difficulty::new(new_pzl.target)
@@ -129,6 +181,12 @@ fn process_request(
             ))?;
         }
         "/miner/solution" => {
+            let miner = if let Some(miner) = miner {
+                miner
+            } else {
+                return Err(Box::<dyn Error>::from("Miner not authorized!".to_string()));
+            };
+
             let sol: Solution = {
                 let mut content = String::new();
                 request.as_reader().read_to_string(&mut content)?;
@@ -228,7 +286,6 @@ struct Miner {
 struct MinerContext {
     history: HashMap<Header, Vec<RegularSendEntry>>,
     client: SyncClient,
-    miners: HashMap<String, Miner>,
     hasher: Arc<Context>,
     current_job: Option<Job>,
 }
@@ -246,6 +303,23 @@ fn send_tx(client: &SyncClient, entries: Vec<RegularSendEntry>) -> Result<(), Bo
     wallet.add_rsend(tx);
     wallet.save(wallet_path).unwrap();
     Ok(())
+}
+
+fn get_miners() -> Result<HashMap<String, Miner>, Box<dyn Error>> {
+    let miners_path = home::home_dir()
+        .unwrap()
+        .join(Path::new(".uzi-pool-miners"));
+    Ok(if let Ok(mut f) = File::open(miners_path) {
+        let mut bytes = Vec::new();
+        f.read_to_end(&mut bytes)?;
+        let miners: Vec<Miner> = bincode::deserialize(&bytes)?;
+        miners
+    } else {
+        Vec::new()
+    }
+    .into_iter()
+    .map(|m| (m.token.clone(), m))
+    .collect())
 }
 
 fn main() {
@@ -267,23 +341,6 @@ fn main() {
             &opt.network,
             opt.miner_token.clone(),
         ),
-        miners: [
-            Miner {
-                token: "haha".into(),
-                pub_key: "0xc8883cc5e8c9f3eaa50fb50363b2f8ec8a044ed59241b4a87ad9f97cddacf5a6"
-                    .parse()
-                    .unwrap(),
-            },
-            Miner {
-                token: "hehe".into(),
-                pub_key: "0xc8883cc5e8c9f3eaa50fb50363b2f8ec8a044ed59241b4a87ad9f97cddacf4a6"
-                    .parse()
-                    .unwrap(),
-            },
-        ]
-        .into_iter()
-        .map(|m| (m.token.clone(), m))
-        .collect(),
         current_job: None,
         hasher: Arc::new(Context::new(b"", false)),
     }));
