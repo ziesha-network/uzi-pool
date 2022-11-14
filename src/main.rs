@@ -49,10 +49,7 @@ struct Opt {
     #[structopt(long, default_value = "5")]
     reward_delay: u64,
 
-    #[structopt(long)]
-    owner: Address,
-
-    #[structopt(long)]
+    #[structopt(long, default_value = "0.01")]
     owner_reward_ratio: f32,
 }
 
@@ -100,7 +97,6 @@ struct AddMinerResponse {
 
 fn job_solved(
     total_reward: Money,
-    owner: Address,
     owner_reward_ratio: f32,
     shares: &[Share],
 ) -> Vec<RegularSendEntry> {
@@ -112,7 +108,6 @@ fn job_solved(
     for share in shares {
         *rewards.entry(share.miner.pub_key.clone()).or_default() += per_share_reward;
     }
-    *rewards.entry(owner).or_default() += owner_reward_64.into();
     rewards
         .into_iter()
         .map(|(k, v)| RegularSendEntry { dst: k, amount: v })
@@ -261,7 +256,6 @@ fn process_request(
                             header,
                             job_solved(
                                 current_job.puzzle.reward,
-                                opt.owner.clone(),
                                 opt.owner_reward_ratio,
                                 &current_job.shares,
                             ),
@@ -332,9 +326,7 @@ struct MinerContext {
 }
 
 fn send_tx(client: &SyncClient, entries: Vec<RegularSendEntry>) -> Result<(), Box<dyn Error>> {
-    let wallet_path = home::home_dir()
-        .unwrap()
-        .join(Path::new(".uzi-pool-wallet"));
+    let wallet_path = home::home_dir().unwrap().join(Path::new(".bazuka-wallet"));
     let mut wallet = Wallet::open(wallet_path.clone())
         .unwrap()
         .unwrap_or_else(|| Wallet::create(&mut rand_mnemonic::thread_rng(), None));
