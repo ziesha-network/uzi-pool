@@ -329,10 +329,12 @@ struct MinerContext {
 }
 
 fn send_tx(client: &SyncClient, entries: Vec<RegularSendEntry>) -> Result<(), Box<dyn Error>> {
-    let wallet_path = home::home_dir().unwrap().join(Path::new(".bazuka-wallet"));
+    let wallet_path = home::home_dir()
+        .unwrap()
+        .join(Path::new(".uzi-pool-wallet"));
     let mut wallet = Wallet::open(wallet_path.clone())
         .unwrap()
-        .expect("Wallet is not initialized!");
+        .unwrap_or_else(|| Wallet::create(&mut rand_mnemonic::thread_rng(), None));
     let tx_builder = TxBuilder::new(&wallet.seed());
     let curr_nonce = client.get_account(tx_builder.get_address())?.account.nonce;
     let new_nonce = wallet.new_r_nonce().unwrap_or(curr_nonce + 1);
