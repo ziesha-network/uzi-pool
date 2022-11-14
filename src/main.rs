@@ -46,6 +46,9 @@ struct Opt {
     #[structopt(long, default_value = "10")]
     share_capacity: usize,
 
+    #[structopt(long, default_value = "5")]
+    reward_delay: u64,
+
     #[structopt(long)]
     owner: Address,
 
@@ -410,12 +413,21 @@ fn main() {
 
     let reward_sender = {
         let ctx = Arc::clone(&context);
+        let opt = opt.clone();
         thread::spawn(move || loop {
             if let Err(e) = || -> Result<(), Box<dyn Error>> {
                 let mut ctx = ctx.lock().unwrap();
+                let max_ind = ctx
+                    .history
+                    .iter()
+                    .map(|(h, _)| h.number)
+                    .max()
+                    .unwrap_or_default();
                 for (h, entries) in ctx.history.clone() {
-                    send_tx(&ctx.client, entries)?;
-                    ctx.history.remove(&h);
+                    if max_ind - h.number >= opt.reward_delay {
+                        send_tx(&ctx.client, entries)?;
+                        ctx.history.remove(&h);
+                    }
                 }
                 Ok(())
             }() {
