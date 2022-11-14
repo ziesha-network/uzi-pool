@@ -45,6 +45,12 @@ struct Opt {
 
     #[structopt(long, default_value = "10")]
     share_capacity: usize,
+
+    #[structopt(long)]
+    owner: Address,
+
+    #[structopt(long)]
+    owner_reward_ratio: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -89,12 +95,21 @@ struct AddMinerResponse {
     miner_token: String,
 }
 
-fn job_solved(total_reward: Money, shares: &[Share]) -> Vec<RegularSendEntry> {
-    let per_share_reward: Money = (Into::<u64>::into(total_reward) / (shares.len() as u64)).into();
+fn job_solved(
+    total_reward: Money,
+    owner: Address,
+    owner_reward_ratio: f32,
+    shares: &[Share],
+) -> Vec<RegularSendEntry> {
+    let total_reward_64 = Into::<u64>::into(total_reward);
+    let owner_reward_64 = (total_reward_64 as f64 * owner_reward_ratio as f64) as u64;
+    let per_share_reward: Money =
+        ((total_reward_64 - owner_reward_64) / (shares.len() as u64)).into();
     let mut rewards: HashMap<Address, Money> = HashMap::new();
     for share in shares {
         *rewards.entry(share.miner.pub_key.clone()).or_default() += per_share_reward;
     }
+    *rewards.entry(owner).or_default() += owner_reward_64.into();
     rewards
         .into_iter()
         .map(|(k, v)| RegularSendEntry { dst: k, amount: v })
@@ -241,7 +256,12 @@ fn process_request(
                     if out.meets_difficulty(block_diff) {
                         block_solved = Some((
                             header,
-                            job_solved(current_job.puzzle.reward, &current_job.shares),
+                            job_solved(
+                                current_job.puzzle.reward,
+                                opt.owner.clone(),
+                                opt.owner_reward_ratio,
+                                &current_job.shares,
+                            ),
                         ));
 
                         println!("{} {}", "Solution found by:".bright_green(), miner.token);
@@ -350,6 +370,9 @@ fn main() {
     env_logger::init();
     let opt = Opt::from_args();
     println!("{} {}", "Listening to:".bright_yellow(), opt.listen);
+    if opt.owner_reward_ratio > 1.0 || opt.owner_reward_ratio < 0.0 {
+        println!("Owner reward ratio should be between 0.0 and 1.0!")
+    }
 
     let server = Server::http(opt.listen).unwrap();
     let context = Arc::new(Mutex::new(MinerContext {
