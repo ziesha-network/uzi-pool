@@ -26,7 +26,7 @@ pub struct Solution {
 }
 
 #[derive(Debug, StructOpt, Clone)]
-#[structopt(name = "Uzi Pool", about = "Mine Zeeka with Uzi!")]
+#[structopt(name = "Uzi Pool", about = "Mine Ziesha with Uzi!")]
 struct Opt {
     #[structopt(short = "n", long = "node")]
     node: SocketAddr,
@@ -116,7 +116,7 @@ fn job_solved(
 
 fn fetch_miner_token(req: &tiny_http::Request) -> Option<String> {
     for h in req.headers() {
-        if h.field.equiv("X-ZEEKA-MINER-TOKEN") {
+        if h.field.equiv("X-ZIESHA-MINER-TOKEN") {
             return Some(h.value.clone().into());
         }
     }
@@ -263,7 +263,7 @@ fn process_request(
 
                         println!("{} {}", "Solution found by:".bright_green(), miner.token);
                         ureq::post(&format!("http://{}/miner/solution", opt.node))
-                            .set("X-ZEEKA-MINER-TOKEN", &opt.miner_token)
+                            .set("X-ZIESHA-MINER-TOKEN", &opt.miner_token)
                             .send_json(json!({ "nonce": sol.nonce }))?;
                     } else {
                         println!("{} {}", "Share found by:".bright_green(), miner.token);
@@ -359,7 +359,7 @@ fn get_miners() -> Result<HashMap<String, Miner>, Box<dyn Error>> {
 
 fn main() {
     println!(
-        "{} v{} - RandomX Mining Pool for Zeeka Cryptocurrency",
+        "{} v{} - RandomX Mining Pool for Ziesha Cryptocurrency",
         "Uzi-Pool!".bright_green(),
         env!("CARGO_PKG_VERSION")
     );
@@ -389,7 +389,7 @@ fn main() {
         thread::spawn(move || loop {
             if let Err(e) = || -> Result<(), Box<dyn Error>> {
                 let pzl = ureq::get(&format!("http://{}/miner/puzzle", opt.node))
-                    .set("X-ZEEKA-MINER-TOKEN", &opt.miner_token)
+                    .set("X-ZIESHA-MINER-TOKEN", &opt.miner_token)
                     .call()?
                     .into_string()?;
 
