@@ -51,6 +51,7 @@ Now the member can connect to the pool:
 
 ```
 uzi-miner --pool --node IP_OF_THE_POOL:8766 --miner-token "MINER TOKEN OF MEMBER" --thread NUM_THREADS
+```
 
 ***The miner should pass `--pool` flag to uzi-miner if he is mining on a pool, or his miner will not run correctly!***
 
