@@ -194,7 +194,9 @@ fn process_request(
         }
         "/miner/puzzle" => {
             if miner.is_none() {
-                return Err(Box::<dyn Error>::from("Miner not authorized!".to_string()));
+                log::warn!("Miner not authorized!");
+                request.respond(Response::empty(401))?;
+                return Ok(());
             };
 
             let easy_puzzle = ctx.current_job.as_ref().map(|j| {
@@ -215,7 +217,9 @@ fn process_request(
             let miner = if let Some(miner) = miner {
                 miner
             } else {
-                return Err(Box::<dyn Error>::from("Miner not authorized!".to_string()));
+                log::warn!("Miner not authorized!");
+                request.respond(Response::empty(401))?;
+                return Ok(());
             };
 
             let sol: Solution = {
@@ -268,7 +272,7 @@ fn process_request(
                     } else {
                         println!("{} {}", "Share found by:".bright_green(), miner.token);
                     }
-                    request.respond(Response::from_string("OK"))?;
+                    request.respond(Response::empty(200))?;
                 }
             }
             if let Some((header, entries)) = block_solved {
