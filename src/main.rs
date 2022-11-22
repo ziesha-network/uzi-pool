@@ -336,8 +336,7 @@ fn send_tx(client: &SyncClient, entries: Vec<RegularSendEntry>) -> Result<(), Bo
         .unwrap_or_else(|| Wallet::create(&mut rand_mnemonic::thread_rng(), None));
     let tx_builder = TxBuilder::new(&wallet.seed());
     let curr_nonce = client.get_account(tx_builder.get_address())?.account.nonce;
-    let new_nonce = wallet.new_r_nonce().unwrap_or(curr_nonce + 1);
-    let tx = tx_builder.create_multi_transaction(entries, 0.into(), new_nonce);
+    let tx = tx_builder.create_multi_transaction(entries, 0.into(), curr_nonce + 1);
     client.transact(tx.clone())?;
     wallet.add_rsend(tx);
     wallet.save(wallet_path).unwrap();
