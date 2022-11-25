@@ -85,6 +85,30 @@ struct History {
     solved: HashMap<Header, Vec<RegularSendEntry>>,
 }
 
+fn save_history(h: &History) -> Result<(), Box<dyn Error>> {
+    let history_path = home::home_dir()
+        .unwrap()
+        .join(Path::new(".uzi-pool-history"));
+    File::create(history_path)?.write_all(&bincode::serialize(h)?)?;
+    Ok(())
+}
+
+fn get_history() -> Result<History, Box<dyn Error>> {
+    let history_path = home::home_dir()
+        .unwrap()
+        .join(Path::new(".uzi-pool-history"));
+    Ok(if let Ok(mut f) = File::open(history_path) {
+        let mut bytes = Vec::new();
+        f.read_to_end(&mut bytes)?;
+        let miners: History = bincode::deserialize(&bytes)?;
+        miners
+    } else {
+        History {
+            solved: HashMap::new(),
+        }
+    })
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 struct AddMinerRequest {
     pub_key: String,
@@ -276,7 +300,9 @@ fn process_request(
                 }
             }
             if let Some((header, entries)) = block_solved {
-                ctx.history.insert(header, entries);
+                let mut h = get_history()?;
+                h.solved.insert(header, entries);
+                save_history(&h)?;
                 ctx.current_job = None;
             }
         }
@@ -323,7 +349,6 @@ struct Miner {
 }
 
 struct MinerContext {
-    history: HashMap<Header, Vec<RegularSendEntry>>,
     client: SyncClient,
     hasher: Arc<Context>,
     current_job: Option<Job>,
@@ -376,7 +401,6 @@ fn main() {
 
     let server = Server::http(opt.listen).unwrap();
     let context = Arc::new(Mutex::new(MinerContext {
-        history: HashMap::new(),
         client: SyncClient::new(
             bazuka::client::PeerAddress(opt.node),
             &opt.network,
@@ -411,19 +435,21 @@ fn main() {
         let opt = opt.clone();
         thread::spawn(move || loop {
             if let Err(e) = || -> Result<(), Box<dyn Error>> {
-                let mut ctx = ctx.lock().unwrap();
-                let max_ind = ctx
-                    .history
+                let ctx = ctx.lock().unwrap();
+                let mut hist = get_history()?;
+                let max_ind = hist
+                    .solved
                     .iter()
                     .map(|(h, _)| h.number)
                     .max()
                     .unwrap_or_default();
-                for (h, entries) in ctx.history.clone() {
+                for (h, entries) in hist.solved.clone() {
                     if max_ind - h.number >= opt.reward_delay {
                         send_tx(&ctx.client, entries)?;
-                        ctx.history.remove(&h);
+                        hist.solved.remove(&h);
                     }
                 }
+                save_history(&hist)?;
                 Ok(())
             }() {
                 log::error!("Error: {}", e);
