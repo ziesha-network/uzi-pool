@@ -58,4 +58,9 @@ impl SyncClient {
     ) -> Result<bazuka::client::messages::GetAccountResponse, Box<dyn Error>> {
         self.call(move |client| async move { Ok(client.get_account(address).await?) })
     }
+    pub fn get_header(&self, index: u64) -> Result<Option<bazuka::core::Header>, Box<dyn Error>> {
+        self.call(move |client| async move {
+            Ok(client.get_headers(index, 1).await?.headers.first().cloned())
+        })
+    }
 }

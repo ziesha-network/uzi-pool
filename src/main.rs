@@ -354,14 +354,18 @@ struct MinerContext {
     current_job: Option<Job>,
 }
 
-fn send_tx(client: &SyncClient, entries: Vec<RegularSendEntry>) -> Result<(), Box<dyn Error>> {
+fn send_tx(
+    client: &SyncClient,
+    entries: Vec<RegularSendEntry>,
+    i: usize,
+) -> Result<(), Box<dyn Error>> {
     let wallet_path = home::home_dir().unwrap().join(Path::new(".bazuka-wallet"));
     let mut wallet = Wallet::open(wallet_path.clone())
         .unwrap()
         .unwrap_or_else(|| Wallet::create(&mut rand_mnemonic::thread_rng(), None));
     let tx_builder = TxBuilder::new(&wallet.seed());
     let curr_nonce = client.get_account(tx_builder.get_address())?.account.nonce;
-    let tx = tx_builder.create_multi_transaction(entries, 0.into(), curr_nonce + 1);
+    let tx = tx_builder.create_multi_transaction(entries, 0.into(), curr_nonce + 1 + i as u32);
     client.transact(tx.clone())?;
     wallet.add_rsend(tx);
     wallet.save(wallet_path).unwrap();
@@ -443,10 +447,13 @@ fn main() {
                     .map(|(h, _)| h.number)
                     .max()
                     .unwrap_or_default();
-                for (h, entries) in hist.solved.clone() {
-                    if max_ind - h.number >= opt.reward_delay {
-                        send_tx(&ctx.client, entries)?;
-                        hist.solved.remove(&h);
+                for (i, (h, entries)) in hist.solved.clone().into_iter().enumerate() {
+                    if let Some(mut actual_header) = ctx.client.get_header(h.number)? {
+                        actual_header.proof_of_work.nonce = 0;
+                        if actual_header == h && max_ind - h.number >= opt.reward_delay {
+                            send_tx(&ctx.client, entries, i)?;
+                            hist.solved.remove(&h);
+                        }
                     }
                 }
                 save_history(&hist)?;
