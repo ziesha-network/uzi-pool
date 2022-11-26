@@ -441,16 +441,11 @@ fn main() {
             if let Err(e) = || -> Result<(), Box<dyn Error>> {
                 let ctx = ctx.lock().unwrap();
                 let mut hist = get_history()?;
-                let max_ind = hist
-                    .solved
-                    .iter()
-                    .map(|(h, _)| h.number)
-                    .max()
-                    .unwrap_or_default();
+                let curr_height = ctx.client.get_height()?;
                 for (i, (h, entries)) in hist.solved.clone().into_iter().enumerate() {
                     if let Some(mut actual_header) = ctx.client.get_header(h.number)? {
                         actual_header.proof_of_work.nonce = 0;
-                        if actual_header == h && max_ind - h.number >= opt.reward_delay {
+                        if actual_header == h && curr_height - h.number >= opt.reward_delay {
                             send_tx(&ctx.client, entries, i)?;
                             hist.solved.remove(&h);
                         }

@@ -63,4 +63,7 @@ impl SyncClient {
             Ok(client.get_headers(index, 1).await?.headers.first().cloned())
         })
     }
+    pub fn get_height(&self) -> Result<u64, Box<dyn Error>> {
+        self.call(move |client| async move { Ok(client.stats().await.map(|resp| resp.height)?) })
+    }
 }
