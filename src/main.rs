@@ -371,9 +371,7 @@ fn send_tx(
     i: usize,
 ) -> Result<(), Box<dyn Error>> {
     let wallet_path = home::home_dir().unwrap().join(Path::new(".bazuka-wallet"));
-    let mut wallet = Wallet::open(wallet_path.clone())
-        .unwrap()
-        .unwrap_or_else(|| Wallet::create(&mut rand_mnemonic::thread_rng(), None));
+    let mut wallet = Wallet::open(wallet_path.clone()).unwrap().unwrap();
     let tx_builder = TxBuilder::new(&wallet.seed());
     let curr_nonce = client.get_account(tx_builder.get_address())?.account.nonce;
     let tx = tx_builder.create_multi_transaction(entries, 0.into(), curr_nonce + 1 + i as u32);
@@ -450,13 +448,14 @@ fn main() {
         let opt = opt.clone();
         thread::spawn(move || loop {
             if let Err(e) = || -> Result<(), Box<dyn Error>> {
-                let ctx = ctx.lock().unwrap();
+                let ctx = ctx.lock()?;
                 let mut hist = get_history()?;
                 let curr_height = ctx.client.get_height()?;
                 for (i, (h, entries)) in hist.solved.clone().into_iter().enumerate() {
                     if let Some(mut actual_header) = ctx.client.get_header(h.number)? {
                         actual_header.proof_of_work.nonce = 0;
                         if actual_header == h && curr_height - h.number >= opt.reward_delay {
+                            println!("Sending rewards for block #{}...", h.number);
                             send_tx(&ctx.client, entries, i)?;
                             hist.solved.remove(&h);
                         }
