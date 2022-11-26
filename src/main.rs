@@ -2,6 +2,7 @@ mod client;
 
 use bazuka::core::{Address, Header, Money, RegularSendEntry};
 use bazuka::wallet::{TxBuilder, Wallet};
+use chrono::prelude::*;
 use client::SyncClient;
 use colored::Colorize;
 use rust_randomx::{Context, Hasher};
@@ -289,12 +290,22 @@ fn process_request(
                             ),
                         ));
 
-                        println!("{} {}", "Solution found by:".bright_green(), miner.token);
+                        println!(
+                            "{} -> {} {}",
+                            Local::now(),
+                            "Solution found by:".bright_green(),
+                            miner.token
+                        );
                         ureq::post(&format!("http://{}/miner/solution", opt.node))
                             .set("X-ZIESHA-MINER-TOKEN", &opt.miner_token)
                             .send_json(json!({ "nonce": sol.nonce }))?;
                     } else {
-                        println!("{} {}", "Share found by:".bright_green(), miner.token);
+                        println!(
+                            "{} -> {} {}",
+                            Local::now(),
+                            "Share found by:".bright_green(),
+                            miner.token
+                        );
                     }
                     request.respond(Response::empty(200))?;
                 }
