@@ -8,7 +8,7 @@ use colored::Colorize;
 use rust_randomx::{Context, Hasher};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
 use std::io::{Read, Write};
@@ -64,6 +64,7 @@ struct Share {
 struct Job {
     puzzle: Puzzle,
     shares: Vec<Share>,
+    nonces: HashSet<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -275,37 +276,46 @@ fn process_request(
                 let out = hasher.hash(&blob);
 
                 if out.meets_difficulty(share_diff) {
-                    current_job.shares.push(Share {
-                        miner: miner.clone(),
-                        nonce: sol.nonce.clone(),
-                    });
-                    while current_job.shares.len() > opt.share_capacity {
-                        current_job.shares.remove(0);
-                    }
-                    if out.meets_difficulty(block_diff) {
-                        block_solved = Some((
-                            header,
-                            job_solved(
-                                current_job.puzzle.reward,
-                                opt.owner_reward_ratio,
-                                &current_job.shares,
-                            ),
-                        ));
+                    if !current_job.nonces.contains(&sol.nonce) {
+                        current_job.shares.push(Share {
+                            miner: miner.clone(),
+                            nonce: sol.nonce.clone(),
+                        });
+                        current_job.nonces.insert(sol.nonce.clone());
+                        while current_job.shares.len() > opt.share_capacity {
+                            current_job.shares.remove(0);
+                        }
+                        if out.meets_difficulty(block_diff) {
+                            block_solved = Some((
+                                header,
+                                job_solved(
+                                    current_job.puzzle.reward,
+                                    opt.owner_reward_ratio,
+                                    &current_job.shares,
+                                ),
+                            ));
 
-                        println!(
-                            "{} -> {} {}",
-                            Local::now(),
-                            "Solution found by:".bright_green(),
-                            miner.token
-                        );
-                        ureq::post(&format!("http://{}/miner/solution", opt.node))
-                            .set("X-ZIESHA-MINER-TOKEN", &opt.miner_token)
-                            .send_json(json!({ "nonce": sol.nonce }))?;
+                            println!(
+                                "{} -> {} {}",
+                                Local::now(),
+                                "Solution found by:".bright_green(),
+                                miner.token
+                            );
+                            ureq::post(&format!("http://{}/miner/solution", opt.node))
+                                .set("X-ZIESHA-MINER-TOKEN", &opt.miner_token)
+                                .send_json(json!({ "nonce": sol.nonce }))?;
+                        } else {
+                            println!(
+                                "{} -> {} {}",
+                                Local::now(),
+                                "Share found by:".bright_green(),
+                                miner.token
+                            );
+                        }
                     } else {
-                        println!(
-                            "{} -> {} {}",
-                            Local::now(),
-                            "Share found by:".bright_green(),
+                        log::warn!(
+                            "{} {}",
+                            "Duplicated share submitted by:".bright_green(),
                             miner.token
                         );
                     }
@@ -333,6 +343,7 @@ fn new_puzzle(context: Arc<Mutex<MinerContext>>, req: PuzzleWrapper) -> Result<(
         ctx.current_job = Some(Job {
             puzzle: req.clone(),
             shares: vec![],
+            nonces: HashSet::new(),
         });
         let req_key = hex::decode(&req.key)?;
 
