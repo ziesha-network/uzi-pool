@@ -84,6 +84,7 @@ struct PuzzleWrapper {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 struct History {
     solved: HashMap<Header, Vec<RegularSendEntry>>,
+    sent: HashMap<Header, bazuka::core::TransactionAndDelta>,
 }
 
 fn save_history(h: &History) -> Result<(), Box<dyn Error>> {
@@ -106,6 +107,7 @@ fn get_history() -> Result<History, Box<dyn Error>> {
     } else {
         History {
             solved: HashMap::new(),
+            sent: HashMap::new(),
         }
     })
 }
@@ -365,20 +367,16 @@ struct MinerContext {
     current_job: Option<Job>,
 }
 
-fn send_tx(
-    client: &SyncClient,
+fn create_tx(
+    wallet: &mut Wallet,
     entries: Vec<RegularSendEntry>,
-) -> Result<(), Box<dyn Error>> {
-    let wallet_path = home::home_dir().unwrap().join(Path::new(".bazuka-wallet"));
-    let mut wallet = Wallet::open(wallet_path.clone()).unwrap().unwrap();
+    remote_nonce: u32,
+) -> Result<bazuka::core::TransactionAndDelta, Box<dyn Error>> {
     let tx_builder = TxBuilder::new(&wallet.seed());
-    let curr_nonce = client.get_account(tx_builder.get_address())?.account.nonce;
-    let new_nonce = wallet.new_r_nonce().unwrap_or(curr_nonce + 1);
+    let new_nonce = wallet.new_r_nonce().unwrap_or(remote_nonce + 1);
     let tx = tx_builder.create_multi_transaction(entries, 0.into(), new_nonce);
-    client.transact(tx.clone())?;
-    wallet.add_rsend(tx);
-    wallet.save(wallet_path).unwrap();
-    Ok(())
+    wallet.add_rsend(tx.clone());
+    Ok(tx)
 }
 
 fn get_miners() -> Result<HashMap<String, Miner>, Box<dyn Error>> {
@@ -451,22 +449,39 @@ fn main() {
                 let ctx = ctx.lock()?;
                 let mut hist = get_history()?;
                 let curr_height = ctx.client.get_height()?;
+                let wallet_path = home::home_dir().unwrap().join(Path::new(".bazuka-wallet"));
+                let mut wallet = Wallet::open(wallet_path.clone()).unwrap().unwrap();
+                let curr_nonce = ctx
+                    .client
+                    .get_account(TxBuilder::new(&wallet.seed()).get_address())?
+                    .account
+                    .nonce;
                 for (h, entries) in hist.solved.clone().into_iter() {
                     if let Some(mut actual_header) = ctx.client.get_header(h.number)? {
                         actual_header.proof_of_work.nonce = 0;
                         if actual_header == h && curr_height - h.number >= opt.reward_delay {
-                            println!("Sending rewards for block #{}...", h.number);
-                            send_tx(&ctx.client, entries)?;
+                            let tx = create_tx(&mut wallet, entries, curr_nonce)?;
+                            wallet.save(wallet_path.clone()).unwrap();
                             hist.solved.remove(&h);
+                            hist.sent.insert(h, tx);
                         }
                     }
                 }
+                for (h, tx) in hist.sent.clone().into_iter() {
+                    if tx.tx.nonce > curr_nonce {
+                        println!("Sending rewards for block #{}...", h.number);
+                        ctx.client.transact(tx.clone())?;
+                    } else {
+                        hist.sent.remove(&h);
+                    }
+                }
+
                 save_history(&hist)?;
                 Ok(())
             }() {
                 log::error!("Error: {}", e);
             }
-            std::thread::sleep(std::time::Duration::from_secs(5));
+            std::thread::sleep(std::time::Duration::from_secs(60));
         })
     };
 
