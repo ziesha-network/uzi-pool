@@ -470,11 +470,13 @@ fn main() {
                 for (h, entries) in hist.solved.clone().into_iter() {
                     if let Some(mut actual_header) = ctx.client.get_header(h.number)? {
                         actual_header.proof_of_work.nonce = 0;
-                        if actual_header == h && curr_height - h.number >= opt.reward_delay {
-                            let tx = create_tx(&mut wallet, entries, curr_nonce)?;
-                            wallet.save(wallet_path.clone()).unwrap();
+                        if curr_height - h.number >= opt.reward_delay {
                             hist.solved.remove(&h);
-                            hist.sent.insert(h, tx);
+                            if actual_header == h {
+                                let tx = create_tx(&mut wallet, entries, curr_nonce)?;
+                                wallet.save(wallet_path.clone()).unwrap();
+                                hist.sent.insert(h, tx);
+                            }
                             save_history(&hist)?;
                         }
                     }
