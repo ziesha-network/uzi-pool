@@ -475,6 +475,7 @@ fn main() {
                             wallet.save(wallet_path.clone()).unwrap();
                             hist.solved.remove(&h);
                             hist.sent.insert(h, tx);
+                            save_history(&hist)?;
                         }
                     }
                 }
@@ -484,10 +485,10 @@ fn main() {
                         ctx.client.transact(tx.clone())?;
                     } else {
                         hist.sent.remove(&h);
+                        save_history(&hist)?;
                     }
                 }
 
-                save_history(&hist)?;
                 Ok(())
             }() {
                 log::error!("Error: {}", e);
