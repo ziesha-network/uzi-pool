@@ -319,7 +319,6 @@ fn process_request(
                             miner.token
                         );
                     }
-                    request.respond(Response::empty(200))?;
                 }
             }
             if let Some((header, entries)) = block_solved {
@@ -328,6 +327,7 @@ fn process_request(
                 save_history(&h)?;
                 ctx.current_job = None;
             }
+            request.respond(Response::empty(200))?;
         }
         _ => {}
     }
