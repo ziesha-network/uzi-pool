@@ -82,7 +82,7 @@ struct PuzzleWrapper {
     puzzle: Option<Puzzle>,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct History {
     solved: HashMap<Header, Vec<RegularSendEntry>>,
     sent: HashMap<Header, bazuka::core::TransactionAndDelta>,
