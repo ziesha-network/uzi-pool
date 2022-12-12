@@ -92,7 +92,7 @@ fn save_history(h: &History) -> Result<(), Box<dyn Error>> {
     let history_path = home::home_dir()
         .unwrap()
         .join(Path::new(".uzi-pool-history"));
-    File::create(history_path)?.write_all(&bincode::serialize(h)?)?;
+    File::create(history_path)?.write_all(&serde_json::to_vec(h)?)?;
     Ok(())
 }
 
@@ -100,11 +100,17 @@ fn get_history() -> Result<History, Box<dyn Error>> {
     let history_path = home::home_dir()
         .unwrap()
         .join(Path::new(".uzi-pool-history"));
-    Ok(if let Ok(mut f) = File::open(history_path) {
+    Ok(if let Ok(mut f) = File::open(history_path.clone()) {
         let mut bytes = Vec::new();
         f.read_to_end(&mut bytes)?;
-        let miners: History = bincode::deserialize(&bytes)?;
-        miners
+        drop(f);
+        let history_bincode: Option<History> = bincode::deserialize(&bytes).ok();
+        if let Some(history) = history_bincode {
+            File::create(history_path)?.write_all(&serde_json::to_vec(&history)?)?;
+            history
+        } else {
+            serde_json::from_slice(&bytes)?
+        }
     } else {
         History {
             solved: HashMap::new(),
@@ -209,7 +215,7 @@ fn process_request(
                     pub_key: add_miner_req.pub_key.parse()?,
                     token: miner_token.clone(),
                 });
-                File::create(miners_path)?.write_all(&bincode::serialize(&miners)?)?;
+                File::create(miners_path)?.write_all(&serde_json::to_vec(&miners)?)?;
                 let mut resp = Response::from_string(
                     serde_json::to_string(&AddMinerResponse { miner_token }).unwrap(),
                 );
@@ -394,11 +400,16 @@ fn get_miners() -> Result<HashMap<String, Miner>, Box<dyn Error>> {
     let miners_path = home::home_dir()
         .unwrap()
         .join(Path::new(".uzi-pool-miners"));
-    Ok(if let Ok(mut f) = File::open(miners_path) {
+    Ok(if let Ok(mut f) = File::open(miners_path.clone()) {
         let mut bytes = Vec::new();
         f.read_to_end(&mut bytes)?;
-        let miners: Vec<Miner> = bincode::deserialize(&bytes)?;
-        miners
+        let miners_bincode: Option<Vec<Miner>> = bincode::deserialize(&bytes).ok();
+        if let Some(miners) = miners_bincode {
+            File::create(miners_path)?.write_all(&serde_json::to_vec(&miners)?)?;
+            miners
+        } else {
+            serde_json::from_slice(&bytes)?
+        }
     } else {
         Vec::new()
     }
