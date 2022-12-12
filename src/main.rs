@@ -92,7 +92,7 @@ fn save_history(h: &History) -> Result<(), Box<dyn Error>> {
     let history_path = home::home_dir()
         .unwrap()
         .join(Path::new(".uzi-pool-history"));
-    File::create(history_path)?.write_all(&serde_json::to_vec(h)?)?;
+    File::create(history_path)?.write_all(&bincode::serialize(h)?)?;
     Ok(())
 }
 
@@ -104,20 +104,12 @@ fn get_history() -> Result<History, Box<dyn Error>> {
         let mut bytes = Vec::new();
         f.read_to_end(&mut bytes)?;
         drop(f);
-        let history_bincode: Option<History> = bincode::deserialize(&bytes).ok();
-        if let Some(history) = history_bincode {
-            File::create(history_path)?.write_all(&serde_json::to_vec(&history)?)?;
-            history
-        } else {
-            serde_json::from_slice(&bytes)?
-        }
+        bincode::deserialize(&bytes)?
     } else {
-        let history = History {
+        History {
             solved: HashMap::new(),
             sent: HashMap::new(),
-        };
-        File::create(history_path)?.write_all(&serde_json::to_vec(&history)?)?;
-        history
+        }
     })
 }
 
