@@ -112,10 +112,12 @@ fn get_history() -> Result<History, Box<dyn Error>> {
             serde_json::from_slice(&bytes)?
         }
     } else {
-        History {
+        let history = History {
             solved: HashMap::new(),
             sent: HashMap::new(),
-        }
+        };
+        File::create(history_path)?.write_all(&serde_json::to_vec(&history)?)?;
+        history
     })
 }
 
