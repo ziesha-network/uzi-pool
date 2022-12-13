@@ -486,11 +486,15 @@ fn main() {
                         }
                     }
                 }
+                println!("Current nonce: {}", curr_nonce);
                 let mut sent_sorted = hist.sent.clone().into_iter().collect::<Vec<_>>();
                 sent_sorted.sort_unstable_by_key(|s| s.1.tx.nonce);
                 for (h, tx) in sent_sorted {
                     if tx.tx.nonce > curr_nonce {
-                        println!("Sending rewards for block #{}...", h.number);
+                        println!(
+                            "Sending rewards for block #{} (Nonce: {})...",
+                            h.number, tx.tx.nonce
+                        );
                         ctx.client.transact(tx.clone())?;
                     } else {
                         hist.sent.remove(&h);
