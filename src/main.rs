@@ -167,7 +167,7 @@ fn process_request(
     opt: &Opt,
 ) -> Result<(), Box<dyn Error>> {
     let mut ctx = context.lock().unwrap();
-    let miners = get_miners()?;
+    let miners = ctx.eligible_miners.clone();
     let miner = if let Some(Some(miner)) = fetch_miner_token(&request).map(|tkn| miners.get(&tkn)) {
         Some(miner.clone())
     } else {
