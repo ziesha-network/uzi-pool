@@ -480,6 +480,7 @@ fn main() {
                             if actual_header == h {
                                 let tx = create_tx(&mut wallet, entries, curr_nonce)?;
                                 wallet.save(wallet_path.clone()).unwrap();
+                                println!("Tx with nonce {} created...", tx.tx.nonce);
                                 hist.sent.insert(h, tx);
                             }
                             save_history(&hist)?;
@@ -498,6 +499,7 @@ fn main() {
                         ctx.client.transact(tx.clone())?;
                     } else {
                         hist.sent.remove(&h);
+                        println!("Tx with nonce {} removed...", tx.tx.nonce);
                         save_history(&hist)?;
                     }
                 }
