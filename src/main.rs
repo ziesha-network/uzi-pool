@@ -376,6 +376,7 @@ struct MinerContext {
     client: SyncClient,
     hasher: Arc<Context>,
     current_job: Option<Job>,
+    eligible_miners: HashMap<String, Miner>,
 }
 
 fn create_tx(
@@ -435,6 +436,7 @@ fn main() {
         ),
         current_job: None,
         hasher: Arc::new(Context::new(b"", false)),
+        eligible_miners: get_miners().unwrap(),
     }));
 
     let puzzle_getter = {
@@ -462,7 +464,8 @@ fn main() {
         let opt = opt.clone();
         thread::spawn(move || loop {
             if let Err(e) = || -> Result<(), Box<dyn Error>> {
-                let ctx = ctx.lock()?;
+                let mut ctx = ctx.lock()?;
+                ctx.eligible_miners = get_miners()?;
                 let mut hist = get_history()?;
                 let curr_height = ctx.client.get_height()?;
                 let wallet_path = home::home_dir().unwrap().join(Path::new(".bazuka-wallet"));
