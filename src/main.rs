@@ -1,6 +1,6 @@
 mod client;
 
-use bazuka::core::{Address, Header, Money, RegularSendEntry};
+use bazuka::core::{Address, Header, Money, RegularSendEntry, TokenId};
 use bazuka::wallet::{TxBuilder, Wallet};
 use chrono::prelude::*;
 use client::SyncClient;
@@ -138,7 +138,11 @@ fn job_solved(
     }
     rewards
         .into_iter()
-        .map(|(k, v)| RegularSendEntry { dst: k, amount: v })
+        .map(|(k, v)| RegularSendEntry {
+            dst: k,
+            token: TokenId::Ziesha,
+            amount: v,
+        })
         .collect()
 }
 
