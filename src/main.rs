@@ -1,6 +1,6 @@
 mod client;
 
-use bazuka::core::{Address, Header, Money, RegularSendEntry, TokenId};
+use bazuka::core::{Address, Header, Money, MpnAddress, MpnDeposit, RegularSendEntry, TokenId};
 use bazuka::wallet::{TxBuilder, Wallet};
 use chrono::prelude::*;
 use client::SyncClient;
@@ -52,6 +52,9 @@ struct Opt {
 
     #[structopt(long, default_value = "0.01")]
     owner_reward_ratio: f32,
+
+    #[structopt(long)]
+    pool_mpn_address: MpnAddress,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -85,7 +88,7 @@ struct PuzzleWrapper {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct History {
     solved: HashMap<Header, Vec<RegularSendEntry>>,
-    sent: HashMap<Header, bazuka::core::TransactionAndDelta>,
+    sent: HashMap<Header, MpnDeposit>,
 }
 
 fn save_history(h: &History) -> Result<(), Box<dyn Error>> {
@@ -387,11 +390,26 @@ fn create_tx(
     wallet: &mut Wallet,
     entries: Vec<RegularSendEntry>,
     remote_nonce: u32,
-) -> Result<bazuka::core::TransactionAndDelta, Box<dyn Error>> {
+    pool_mpn_address: MpnAddress,
+) -> Result<bazuka::core::MpnDeposit, Box<dyn Error>> {
+    let mpn_id = bazuka::config::blockchain::get_blockchain_config().mpn_contract_id;
     let tx_builder = TxBuilder::new(&wallet.seed());
     let new_nonce = wallet.new_r_nonce().unwrap_or(remote_nonce + 1);
-    let tx = tx_builder.create_multi_transaction(entries, 0.into(), new_nonce);
-    wallet.add_rsend(tx.clone());
+    let sum_all = entries
+        .iter()
+        .map(|e| Into::<u64>::into(e.amount))
+        .sum::<u64>();
+    let tx = tx_builder.deposit_mpn(
+        mpn_id,
+        pool_mpn_address,
+        0,
+        new_nonce,
+        bazuka::core::TokenId::Ziesha,
+        sum_all.into(),
+        bazuka::core::TokenId::Ziesha,
+        0.into(),
+    );
+    wallet.add_deposit(tx.clone());
     Ok(tx)
 }
 
@@ -485,9 +503,14 @@ fn main() {
                         if curr_height - h.number >= opt.reward_delay {
                             hist.solved.remove(&h);
                             if actual_header == h {
-                                let tx = create_tx(&mut wallet, entries, curr_nonce)?;
+                                let tx = create_tx(
+                                    &mut wallet,
+                                    entries,
+                                    curr_nonce,
+                                    opt.pool_mpn_address.clone(),
+                                )?;
                                 wallet.save(wallet_path.clone()).unwrap();
-                                println!("Tx with nonce {} created...", tx.tx.nonce);
+                                println!("Tx with nonce {} created...", tx.payment.nonce);
                                 hist.sent.insert(h, tx);
                             }
                             save_history(&hist)?;
@@ -496,17 +519,17 @@ fn main() {
                 }
                 println!("Current nonce: {}", curr_nonce);
                 let mut sent_sorted = hist.sent.clone().into_iter().collect::<Vec<_>>();
-                sent_sorted.sort_unstable_by_key(|s| s.1.tx.nonce);
+                sent_sorted.sort_unstable_by_key(|s| s.1.payment.nonce);
                 for (h, tx) in sent_sorted {
-                    if tx.tx.nonce > curr_nonce {
+                    if tx.payment.nonce > curr_nonce {
                         println!(
                             "Sending rewards for block #{} (Nonce: {})...",
-                            h.number, tx.tx.nonce
+                            h.number, tx.payment.nonce
                         );
-                        ctx.client.transact(tx.clone())?;
+                        ctx.client.transact_deposit(tx.clone())?;
                     } else {
                         hist.sent.remove(&h);
-                        println!("Tx with nonce {} removed...", tx.tx.nonce);
+                        println!("Tx with nonce {} removed...", tx.payment.nonce);
                         save_history(&hist)?;
                     }
                 }
