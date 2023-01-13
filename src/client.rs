@@ -46,18 +46,23 @@ impl SyncClient {
                 res
             })??)
     }
-    #[allow(dead_code)]
-    pub fn transact(
-        &self,
-        tx: bazuka::core::TransactionAndDelta,
-    ) -> Result<bazuka::client::messages::TransactResponse, Box<dyn Error>> {
-        self.call(move |client| async move { Ok(client.transact(tx).await?) })
-    }
     pub fn transact_deposit(
         &self,
         tx: bazuka::core::MpnDeposit,
     ) -> Result<bazuka::client::messages::PostMpnDepositResponse, Box<dyn Error>> {
         self.call(move |client| async move { Ok(client.transact_contract_deposit(tx).await?) })
+    }
+    pub fn transact_zero(
+        &self,
+        tx: bazuka::zk::MpnTransaction,
+    ) -> Result<bazuka::client::messages::PostMpnTransactionResponse, Box<dyn Error>> {
+        self.call(move |client| async move { Ok(client.zero_transact(tx).await?) })
+    }
+    pub fn get_mpn_account(
+        &self,
+        index: u64,
+    ) -> Result<bazuka::client::messages::GetMpnAccountResponse, Box<dyn Error>> {
+        self.call(move |client| async move { Ok(client.get_mpn_account(index).await?) })
     }
     pub fn get_account(
         &self,

@@ -1,7 +1,8 @@
 mod client;
 
-use bazuka::core::{Address, Header, Money, MpnAddress, MpnDeposit, RegularSendEntry, TokenId};
+use bazuka::core::{Header, Money, MpnAddress, MpnDeposit};
 use bazuka::wallet::{TxBuilder, Wallet};
+use bazuka::zk::MpnTransaction;
 use chrono::prelude::*;
 use client::SyncClient;
 use colored::Colorize;
@@ -87,8 +88,8 @@ struct PuzzleWrapper {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct History {
-    solved: HashMap<Header, Vec<RegularSendEntry>>,
-    sent: HashMap<Header, MpnDeposit>,
+    solved: HashMap<Header, HashMap<MpnAddress, Money>>,
+    sent: HashMap<Header, (MpnDeposit, Vec<MpnTransaction>)>,
 }
 
 fn save_history(h: &History) -> Result<(), Box<dyn Error>> {
@@ -118,7 +119,7 @@ fn get_history() -> Result<History, Box<dyn Error>> {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 struct AddMinerRequest {
-    pub_key: String,
+    mpn_addr: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -130,23 +131,16 @@ fn job_solved(
     total_reward: Money,
     owner_reward_ratio: f32,
     shares: &[Share],
-) -> Vec<RegularSendEntry> {
+) -> HashMap<MpnAddress, Money> {
     let total_reward_64 = Into::<u64>::into(total_reward);
     let owner_reward_64 = (total_reward_64 as f64 * owner_reward_ratio as f64) as u64;
     let per_share_reward: Money =
         ((total_reward_64 - owner_reward_64) / (shares.len() as u64)).into();
-    let mut rewards: HashMap<Address, Money> = HashMap::new();
+    let mut rewards: HashMap<MpnAddress, Money> = HashMap::new();
     for share in shares {
-        *rewards.entry(share.miner.pub_key.clone()).or_default() += per_share_reward;
+        *rewards.entry(share.miner.mpn_addr.clone()).or_default() += per_share_reward;
     }
     rewards
-        .into_iter()
-        .map(|(k, v)| RegularSendEntry {
-            dst: k,
-            token: TokenId::Ziesha,
-            amount: v,
-        })
-        .collect()
 }
 
 fn fetch_miner_token(req: &tiny_http::Request) -> Option<String> {
@@ -188,7 +182,7 @@ fn process_request(
             } else {
                 let miners: HashMap<String, String> = miners
                     .into_iter()
-                    .map(|(k, v)| (k, v.pub_key.to_string()))
+                    .map(|(k, v)| (k, v.mpn_addr.to_string()))
                     .collect();
                 let mut resp = Response::from_string(serde_json::to_string(&miners).unwrap());
                 resp.add_header(
@@ -213,7 +207,7 @@ fn process_request(
                 let mut miners = miners.clone().into_values().collect::<Vec<Miner>>();
                 let miner_token = generate_miner_token();
                 miners.push(Miner {
-                    pub_key: add_miner_req.pub_key.parse()?,
+                    mpn_addr: add_miner_req.mpn_addr.parse()?,
                     token: miner_token.clone(),
                 });
                 File::create(miners_path)?.write_all(&serde_json::to_vec(&miners)?)?;
@@ -263,7 +257,7 @@ fn process_request(
                 serde_json::from_str(&content)?
             };
 
-            let mut block_solved: Option<(Header, Vec<RegularSendEntry>)> = None;
+            let mut block_solved: Option<(Header, HashMap<MpnAddress, Money>)> = None;
             let hasher = Hasher::new(ctx.hasher.clone());
             if let Some(current_job) = ctx.current_job.as_mut() {
                 let easy_puzzle = {
@@ -376,7 +370,7 @@ fn new_puzzle(context: Arc<Mutex<MinerContext>>, req: PuzzleWrapper) -> Result<(
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 struct Miner {
     token: String,
-    pub_key: Address,
+    mpn_addr: MpnAddress,
 }
 
 struct MinerContext {
@@ -388,20 +382,24 @@ struct MinerContext {
 
 fn create_tx(
     wallet: &mut Wallet,
-    entries: Vec<RegularSendEntry>,
+    entries: HashMap<MpnAddress, Money>,
     remote_nonce: u32,
+    remote_mpn_nonce: u64,
     pool_mpn_address: MpnAddress,
-) -> Result<bazuka::core::MpnDeposit, Box<dyn Error>> {
+) -> Result<(bazuka::core::MpnDeposit, Vec<MpnTransaction>), Box<dyn Error>> {
     let mpn_id = bazuka::config::blockchain::get_blockchain_config().mpn_contract_id;
     let tx_builder = TxBuilder::new(&wallet.seed());
     let new_nonce = wallet.new_r_nonce().unwrap_or(remote_nonce + 1);
+    let new_mpn_nonce = wallet
+        .new_z_nonce(pool_mpn_address.account_index)
+        .unwrap_or(remote_mpn_nonce);
     let sum_all = entries
         .iter()
-        .map(|e| Into::<u64>::into(e.amount))
+        .map(|(_, m)| Into::<u64>::into(*m))
         .sum::<u64>();
     let tx = tx_builder.deposit_mpn(
         mpn_id,
-        pool_mpn_address,
+        pool_mpn_address.clone(),
         0,
         new_nonce,
         bazuka::core::TokenId::Ziesha,
@@ -410,7 +408,24 @@ fn create_tx(
         0.into(),
     );
     wallet.add_deposit(tx.clone());
-    Ok(tx)
+    let mut ztxs = Vec::new();
+    for (i, (addr, mon)) in entries.iter().enumerate() {
+        let tx = tx_builder.create_mpn_transaction(
+            pool_mpn_address.account_index,
+            0,
+            addr.clone(),
+            0,
+            bazuka::core::TokenId::Ziesha,
+            *mon,
+            0,
+            bazuka::core::TokenId::Ziesha,
+            0.into(),
+            new_mpn_nonce + i as u64,
+        );
+        wallet.add_zsend(tx.clone());
+        ztxs.push(tx);
+    }
+    Ok((tx, ztxs))
 }
 
 fn get_miners() -> Result<HashMap<String, Miner>, Box<dyn Error>> {
@@ -497,21 +512,27 @@ fn main() {
                     .get_account(TxBuilder::new(&wallet.seed()).get_address())?
                     .account
                     .nonce;
+                let curr_mpn_nonce = ctx
+                    .client
+                    .get_mpn_account(opt.pool_mpn_address.account_index)?
+                    .account
+                    .nonce;
                 for (h, entries) in hist.solved.clone().into_iter() {
                     if let Some(mut actual_header) = ctx.client.get_header(h.number)? {
                         actual_header.proof_of_work.nonce = 0;
                         if curr_height - h.number >= opt.reward_delay {
                             hist.solved.remove(&h);
                             if actual_header == h {
-                                let tx = create_tx(
+                                let (tx, ztxs) = create_tx(
                                     &mut wallet,
                                     entries,
                                     curr_nonce,
+                                    curr_mpn_nonce,
                                     opt.pool_mpn_address.clone(),
                                 )?;
                                 wallet.save(wallet_path.clone()).unwrap();
                                 println!("Tx with nonce {} created...", tx.payment.nonce);
-                                hist.sent.insert(h, tx);
+                                hist.sent.insert(h, (tx, ztxs));
                             }
                             save_history(&hist)?;
                         }
@@ -519,14 +540,17 @@ fn main() {
                 }
                 println!("Current nonce: {}", curr_nonce);
                 let mut sent_sorted = hist.sent.clone().into_iter().collect::<Vec<_>>();
-                sent_sorted.sort_unstable_by_key(|s| s.1.payment.nonce);
-                for (h, tx) in sent_sorted {
+                sent_sorted.sort_unstable_by_key(|s| s.1 .0.payment.nonce);
+                for (h, (tx, ztxs)) in sent_sorted {
                     if tx.payment.nonce > curr_nonce {
                         println!(
                             "Sending rewards for block #{} (Nonce: {})...",
                             h.number, tx.payment.nonce
                         );
                         ctx.client.transact_deposit(tx.clone())?;
+                        for ztx in ztxs {
+                            ctx.client.transact_zero(ztx.clone())?;
+                        }
                     } else {
                         hist.sent.remove(&h);
                         println!("Tx with nonce {} removed...", tx.payment.nonce);
