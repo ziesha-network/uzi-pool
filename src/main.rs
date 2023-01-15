@@ -545,7 +545,11 @@ async fn main() -> Result<(), ()> {
 
     // Then bind and serve...
     let server = async {
-        Server::bind(&addr).serve(make_service).await?;
+        Server::bind(&addr)
+            .http1_only(true)
+            .http1_keepalive(false)
+            .serve(make_service)
+            .await?;
         Ok::<(), PoolError>(())
     };
 
@@ -664,19 +668,3 @@ async fn main() -> Result<(), ()> {
 
     Ok(())
 }
-
-/*fn main() {
-
-
-    let server = Server::http().unwrap();
-
-
-    for request in server.incoming_requests() {
-        if let Err(e) = process_request(context.clone(), request, &opt) {
-            log::error!("Error: {}", e);
-        }
-    }
-
-    puzzle_getter.join().unwrap();
-    reward_sender.join().unwrap();
-}*/
