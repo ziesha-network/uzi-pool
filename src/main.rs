@@ -9,7 +9,7 @@ use colored::Colorize;
 use hyper::header::HeaderValue;
 use hyper::server::conn::AddrStream;
 use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Client, Request, Response, Server, StatusCode};
+use hyper::{Body, Client, Method, Request, Response, Server, StatusCode};
 use rust_randomx::{Context, Hasher};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -339,6 +339,7 @@ async fn process_request(
                                 miner.token
                             );
                             let req = Request::builder()
+                                .method(Method::POST)
                                 .uri(format!("http://{}/miner/solution", opt.node))
                                 .header("X-ZIESHA-MINER-TOKEN", &opt.miner_token)
                                 .body(json!({ "nonce": sol.nonce }).to_string().into())?;
