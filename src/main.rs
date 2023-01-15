@@ -6,21 +6,44 @@ use bazuka::zk::MpnTransaction;
 use chrono::prelude::*;
 use client::SyncClient;
 use colored::Colorize;
+use hyper::header::HeaderValue;
+use hyper::server::conn::AddrStream;
+use hyper::service::{make_service_fn, service_fn};
+use hyper::{Body, Client, Request, Response, Server, StatusCode};
 use rust_randomx::{Context, Hasher};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
-use std::error::Error;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::Arc;
 use structopt::StructOpt;
-use tiny_http::{Response, Server};
+use thiserror::Error;
+use tokio::sync::RwLock;
 
 const LISTEN: &'static str = "0.0.0.0:8766";
+
+#[derive(Error, Debug)]
+pub enum PoolError {
+    #[error("server error happened: {0}")]
+    ServerError(#[from] hyper::Error),
+    #[error("client error happened: {0}")]
+    ClientError(#[from] hyper::http::Error),
+    #[error("serde json error happened: {0}")]
+    JsonError(#[from] serde_json::Error),
+    #[error("bincode error happened: {0}")]
+    BincodeError(#[from] bincode::Error),
+    #[error("io error happened: {0}")]
+    IoError(#[from] std::io::Error),
+    #[error("from-hex error happened: {0}")]
+    FromHexError(#[from] hex::FromHexError),
+    #[error("mpn-address parse error happened: {0}")]
+    MpnAddressError(#[from] bazuka::core::ParseMpnAddressError),
+    #[error("node error happened: {0}")]
+    BazukaNodeError(#[from] bazuka::client::NodeError),
+}
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct Solution {
@@ -92,7 +115,7 @@ struct History {
     sent: HashMap<Header, (MpnDeposit, Vec<MpnTransaction>)>,
 }
 
-fn save_history(h: &History) -> Result<(), Box<dyn Error>> {
+fn save_history(h: &History) -> Result<(), PoolError> {
     let history_path = home::home_dir()
         .unwrap()
         .join(Path::new(".uzi-pool-history"));
@@ -100,7 +123,7 @@ fn save_history(h: &History) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn get_history() -> Result<History, Box<dyn Error>> {
+fn get_history() -> Result<History, PoolError> {
     let history_path = home::home_dir()
         .unwrap()
         .join(Path::new(".uzi-pool-history"));
@@ -143,13 +166,12 @@ fn job_solved(
     rewards
 }
 
-fn fetch_miner_token(req: &tiny_http::Request) -> Option<String> {
-    for h in req.headers() {
-        if h.field.equiv("X-ZIESHA-MINER-TOKEN") {
-            return Some(h.value.clone().into());
-        }
+fn fetch_miner_token(req: &Request<Body>) -> Option<String> {
+    if let Some(v) = req.headers().get("X-ZIESHA-MINER-TOKEN") {
+        v.to_str().map(|s| s.into()).ok()
+    } else {
+        None
     }
-    None
 }
 
 fn generate_miner_token() -> String {
@@ -162,48 +184,53 @@ fn generate_miner_token() -> String {
         .collect()
 }
 
-fn process_request(
-    context: Arc<Mutex<MinerContext>>,
-    mut request: tiny_http::Request,
+async fn process_request(
+    context: Arc<RwLock<MinerContext>>,
+    request: Request<Body>,
+    client: Option<SocketAddr>,
     opt: &Opt,
-) -> Result<(), Box<dyn Error>> {
-    let mut ctx = context.lock().unwrap();
+) -> Result<Response<Body>, PoolError> {
+    let mut ctx = context.write().await;
     let miners = ctx.eligible_miners.clone();
     let miner = if let Some(Some(miner)) = fetch_miner_token(&request).map(|tkn| miners.get(&tkn)) {
         Some(miner.clone())
     } else {
         None
     };
-
-    match request.url() {
+    let is_local = client.map(|c| c.ip().is_loopback()).unwrap_or(true);
+    let url = request.uri().path().to_string();
+    match &url[..] {
         "/get-miners" => {
-            if !request.remote_addr().ip().is_loopback() {
-                request.respond(Response::from_string("ERR"))?;
+            if !is_local {
+                let mut resp = Response::new(Body::empty());
+                *resp.status_mut() = StatusCode::FORBIDDEN;
+                return Ok(resp);
             } else {
                 let miners: HashMap<String, String> = miners
                     .into_iter()
                     .map(|(k, v)| (k, v.mpn_addr.to_string()))
                     .collect();
-                let mut resp = Response::from_string(serde_json::to_string(&miners).unwrap());
-                resp.add_header(
-                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                        .unwrap(),
+                let mut resp = Response::new(serde_json::to_string(&miners).unwrap().into());
+                resp.headers_mut().insert(
+                    "Content-Type",
+                    HeaderValue::from_str("application/json").unwrap(),
                 );
-                request.respond(resp)?;
+                return Ok(resp);
             }
         }
         "/add-miner" => {
-            if !request.remote_addr().ip().is_loopback() {
-                request.respond(Response::from_string("ERR"))?;
+            if !is_local {
+                let mut resp = Response::new(Body::empty());
+                *resp.status_mut() = StatusCode::FORBIDDEN;
+                return Ok(resp);
             } else {
                 let miners_path = home::home_dir()
                     .unwrap()
                     .join(Path::new(".uzi-pool-miners"));
-                let add_miner_req: AddMinerRequest = {
-                    let mut content = String::new();
-                    request.as_reader().read_to_string(&mut content)?;
-                    serde_json::from_str(&content)?
-                };
+                let body = request.into_body();
+                let body_bytes = hyper::body::to_bytes(body).await?;
+
+                let add_miner_req: AddMinerRequest = serde_json::from_slice(&body_bytes)?;
                 let mut miners = miners.clone().into_values().collect::<Vec<Miner>>();
                 let miner_token = generate_miner_token();
                 miners.push(Miner {
@@ -211,21 +238,25 @@ fn process_request(
                     token: miner_token.clone(),
                 });
                 File::create(miners_path)?.write_all(&serde_json::to_vec(&miners)?)?;
-                let mut resp = Response::from_string(
-                    serde_json::to_string(&AddMinerResponse { miner_token }).unwrap(),
+                let mut resp = Response::new(
+                    serde_json::to_string(&AddMinerResponse { miner_token })
+                        .unwrap()
+                        .into(),
                 );
-                resp.add_header(
-                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                        .unwrap(),
+                resp.headers_mut().insert(
+                    "Content-Type",
+                    HeaderValue::from_str("application/json").unwrap(),
                 );
-                request.respond(resp)?;
+
+                return Ok(resp);
             }
         }
         "/miner/puzzle" => {
             if miner.is_none() {
                 log::warn!("Miner not authorized!");
-                request.respond(Response::empty(401))?;
-                return Ok(());
+                let mut resp = Response::new(Body::empty());
+                *resp.status_mut() = StatusCode::FORBIDDEN;
+                return Ok(resp);
             };
 
             let easy_puzzle = ctx.current_job.as_ref().map(|j| {
@@ -235,27 +266,32 @@ fn process_request(
                     .to_u32();
                 new_pzl
             });
-            request.respond(Response::from_string(
+            let mut resp = Response::new(
                 serde_json::to_string(&PuzzleWrapper {
                     puzzle: easy_puzzle.clone(),
                 })
-                .unwrap(),
-            ))?;
+                .unwrap()
+                .into(),
+            );
+            resp.headers_mut().insert(
+                "Content-Type",
+                HeaderValue::from_str("application/json").unwrap(),
+            );
+
+            return Ok(resp);
         }
         "/miner/solution" => {
             let miner = if let Some(miner) = miner {
                 miner
             } else {
                 log::warn!("Miner not authorized!");
-                request.respond(Response::empty(401))?;
-                return Ok(());
+                let mut resp = Response::new(Body::empty());
+                *resp.status_mut() = StatusCode::FORBIDDEN;
+                return Ok(resp);
             };
-
-            let sol: Solution = {
-                let mut content = String::new();
-                request.as_reader().read_to_string(&mut content)?;
-                serde_json::from_str(&content)?
-            };
+            let body = request.into_body();
+            let body_bytes = hyper::body::to_bytes(body).await?;
+            let sol: Solution = serde_json::from_slice(&body_bytes)?;
 
             let mut block_solved: Option<(Header, HashMap<MpnAddress, Money>)> = None;
             let hasher = Hasher::new(ctx.hasher.clone());
@@ -302,9 +338,12 @@ fn process_request(
                                 "Solution found by:".bright_green(),
                                 miner.token
                             );
-                            ureq::post(&format!("http://{}/miner/solution", opt.node))
-                                .set("X-ZIESHA-MINER-TOKEN", &opt.miner_token)
-                                .send_json(json!({ "nonce": sol.nonce }))?;
+                            let req = Request::builder()
+                                .uri(format!("http://{}/miner/solution", opt.node))
+                                .header("X-ZIESHA-MINER-TOKEN", &opt.miner_token)
+                                .body(json!({ "nonce": sol.nonce }).to_string().into())?;
+                            let client = Client::new();
+                            client.request(req).await?;
                         } else {
                             println!(
                                 "{} -> {} {}",
@@ -328,15 +367,19 @@ fn process_request(
                 save_history(&h)?;
                 ctx.current_job = None;
             }
-            request.respond(Response::empty(200))?;
+            return Ok(Response::new(Body::empty()));
         }
         _ => {}
     }
-    Ok(())
+
+    Ok(Response::new(Body::empty()))
 }
 
-fn new_puzzle(context: Arc<Mutex<MinerContext>>, req: PuzzleWrapper) -> Result<(), Box<dyn Error>> {
-    let mut ctx = context.lock().unwrap();
+async fn new_puzzle(
+    context: Arc<RwLock<MinerContext>>,
+    req: PuzzleWrapper,
+) -> Result<(), PoolError> {
+    let mut ctx = context.write().await;
     if ctx.current_job.as_ref().map(|j| j.puzzle.clone()) == req.puzzle {
         return Ok(());
     }
@@ -386,7 +429,7 @@ fn create_tx(
     remote_nonce: u32,
     remote_mpn_nonce: u64,
     pool_mpn_address: MpnAddress,
-) -> Result<(bazuka::core::MpnDeposit, Vec<MpnTransaction>), Box<dyn Error>> {
+) -> Result<(bazuka::core::MpnDeposit, Vec<MpnTransaction>), PoolError> {
     let mpn_id = bazuka::config::blockchain::get_blockchain_config().mpn_contract_id;
     let tx_builder = TxBuilder::new(&wallet.seed());
     let new_nonce = wallet.new_r_nonce().unwrap_or(remote_nonce + 1);
@@ -428,7 +471,7 @@ fn create_tx(
     Ok((tx, ztxs))
 }
 
-fn get_miners() -> Result<HashMap<String, Miner>, Box<dyn Error>> {
+fn get_miners() -> Result<HashMap<String, Miner>, PoolError> {
     let miners_path = home::home_dir()
         .unwrap()
         .join(Path::new(".uzi-pool-miners"));
@@ -450,7 +493,8 @@ fn get_miners() -> Result<HashMap<String, Miner>, Box<dyn Error>> {
     .collect())
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), ()> {
     println!(
         "{} v{} - RandomX Mining Pool for Ziesha Cryptocurrency",
         "Uzi-Pool!".bright_green(),
@@ -464,8 +508,7 @@ fn main() {
         println!("Owner reward ratio should be between 0.0 and 1.0!")
     }
 
-    let server = Server::http(opt.listen).unwrap();
-    let context = Arc::new(Mutex::new(MinerContext {
+    let context = Arc::new(RwLock::new(MinerContext {
         client: SyncClient::new(
             bazuka::client::PeerAddress(opt.node),
             &opt.network,
@@ -476,95 +519,157 @@ fn main() {
         eligible_miners: get_miners().unwrap(),
     }));
 
-    let puzzle_getter = {
-        let ctx = Arc::clone(&context);
-        let opt = opt.clone();
-        thread::spawn(move || loop {
-            if let Err(e) = || -> Result<(), Box<dyn Error>> {
-                let pzl = ureq::get(&format!("http://{}/miner/puzzle", opt.node))
-                    .set("X-ZIESHA-MINER-TOKEN", &opt.miner_token)
-                    .call()?
-                    .into_string()?;
+    // Construct our SocketAddr to listen on...
+    let addr = SocketAddr::from(opt.listen);
 
-                let pzl_json: PuzzleWrapper = serde_json::from_str(&pzl)?;
-                new_puzzle(ctx.clone(), pzl_json)?;
-                Ok(())
-            }() {
-                log::error!("Error: {}", e);
-            }
-            std::thread::sleep(std::time::Duration::from_secs(5));
-        })
+    // And a MakeService to handle each connection...
+    let ctx_server = Arc::clone(&context);
+    let opt_server = opt.clone();
+    let make_service = make_service_fn(move |conn: &AddrStream| {
+        let client = conn.remote_addr();
+        let opt = opt_server.clone();
+        let ctx = Arc::clone(&ctx_server);
+        async move {
+            let opt = opt.clone();
+            let ctx = Arc::clone(&ctx);
+            Ok::<_, PoolError>(service_fn(move |req: Request<Body>| {
+                let opt = opt.clone();
+                let ctx = Arc::clone(&ctx);
+                async move {
+                    let resp = process_request(ctx, req, Some(client), &opt).await?;
+                    Ok::<_, PoolError>(resp)
+                }
+            }))
+        }
+    });
+
+    // Then bind and serve...
+    let server = async {
+        Server::bind(&addr).serve(make_service).await?;
+        Ok::<(), PoolError>(())
     };
 
+    let ctx_puzzle_getter = Arc::clone(&context);
+    let opt_puzzle_getter = opt.clone();
+    let puzzle_getter = async move {
+        loop {
+            let ctx = Arc::clone(&ctx_puzzle_getter);
+            let opt = opt_puzzle_getter.clone();
+            if let Err(e) = async move {
+                let req = Request::builder()
+                    .uri(format!("http://{}/miner/puzzle", opt.node))
+                    .header("X-ZIESHA-MINER-TOKEN", &opt.miner_token)
+                    .body(Body::empty())?;
+                let client = Client::new();
+                let resp = hyper::body::to_bytes(client.request(req).await?.into_body()).await?;
+                let pzl_json: PuzzleWrapper = serde_json::from_slice(&resp)?;
+                new_puzzle(ctx.clone(), pzl_json).await?;
+                Ok::<_, PoolError>(())
+            }
+            .await
+            {
+                log::error!("Error: {}", e);
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        Ok::<(), PoolError>(())
+    };
+
+    let ctx_reward_sender = Arc::clone(&context);
+    let opt_reward_sender = opt.clone();
     let reward_sender = {
-        let ctx = Arc::clone(&context);
-        let opt = opt.clone();
-        thread::spawn(move || loop {
-            if let Err(e) = || -> Result<(), Box<dyn Error>> {
-                let mut ctx = ctx.lock()?;
-                ctx.eligible_miners = get_miners()?;
-                let mut hist = get_history()?;
-                let curr_height = ctx.client.get_height()?;
-                let wallet_path = home::home_dir().unwrap().join(Path::new(".bazuka-wallet"));
-                let mut wallet = Wallet::open(wallet_path.clone()).unwrap().unwrap();
-                let curr_nonce = ctx
-                    .client
-                    .get_account(TxBuilder::new(&wallet.seed()).get_address())?
-                    .account
-                    .nonce;
-                let curr_mpn_nonce = ctx
-                    .client
-                    .get_mpn_account(opt.pool_mpn_address.account_index)?
-                    .account
-                    .nonce;
-                for (h, entries) in hist.solved.clone().into_iter() {
-                    if let Some(mut actual_header) = ctx.client.get_header(h.number)? {
-                        actual_header.proof_of_work.nonce = 0;
-                        if curr_height - h.number >= opt.reward_delay {
-                            hist.solved.remove(&h);
-                            if actual_header == h {
-                                let (tx, ztxs) = create_tx(
-                                    &mut wallet,
-                                    entries,
-                                    curr_nonce,
-                                    curr_mpn_nonce,
-                                    opt.pool_mpn_address.clone(),
-                                )?;
-                                wallet.save(wallet_path.clone()).unwrap();
-                                println!("Tx with nonce {} created...", tx.payment.nonce);
-                                hist.sent.insert(h, (tx, ztxs));
+        let ctx = Arc::clone(&ctx_reward_sender);
+        let opt = opt_reward_sender.clone();
+        async move {
+            loop {
+                let ctx = Arc::clone(&ctx);
+                let opt = opt.clone();
+                if let Err(e) = async move {
+                    let mut ctx = ctx.write().await;
+                    ctx.eligible_miners = get_miners()?;
+                    let mut hist = get_history()?;
+                    let curr_height = ctx.client.get_height().await?;
+                    let wallet_path = home::home_dir().unwrap().join(Path::new(".bazuka-wallet"));
+                    let mut wallet = Wallet::open(wallet_path.clone()).unwrap().unwrap();
+                    let curr_nonce = ctx
+                        .client
+                        .get_account(TxBuilder::new(&wallet.seed()).get_address())
+                        .await?
+                        .account
+                        .nonce;
+                    let curr_mpn_nonce = ctx
+                        .client
+                        .get_mpn_account(opt.pool_mpn_address.account_index)
+                        .await?
+                        .account
+                        .nonce;
+                    for (h, entries) in hist.solved.clone().into_iter() {
+                        if let Some(mut actual_header) = ctx.client.get_header(h.number).await? {
+                            actual_header.proof_of_work.nonce = 0;
+                            if curr_height - h.number >= opt.reward_delay {
+                                hist.solved.remove(&h);
+                                if actual_header == h {
+                                    let (tx, ztxs) = create_tx(
+                                        &mut wallet,
+                                        entries,
+                                        curr_nonce,
+                                        curr_mpn_nonce,
+                                        opt.pool_mpn_address.clone(),
+                                    )?;
+                                    wallet.save(wallet_path.clone()).unwrap();
+                                    println!("Tx with nonce {} created...", tx.payment.nonce);
+                                    hist.sent.insert(h, (tx, ztxs));
+                                }
+                                save_history(&hist)?;
                             }
+                        }
+                    }
+                    println!("Current nonce: {}", curr_nonce);
+                    let mut sent_sorted = hist.sent.clone().into_iter().collect::<Vec<_>>();
+                    sent_sorted.sort_unstable_by_key(|s| s.1 .0.payment.nonce);
+                    for (h, (tx, ztxs)) in sent_sorted {
+                        if tx.payment.nonce > curr_nonce {
+                            println!(
+                                "Sending rewards for block #{} (Nonce: {})...",
+                                h.number, tx.payment.nonce
+                            );
+                            ctx.client.transact_deposit(tx.clone()).await?;
+                            for ztx in ztxs {
+                                ctx.client.transact_zero(ztx.clone()).await?;
+                            }
+                        } else {
+                            hist.sent.remove(&h);
+                            println!("Tx with nonce {} removed...", tx.payment.nonce);
                             save_history(&hist)?;
                         }
                     }
-                }
-                println!("Current nonce: {}", curr_nonce);
-                let mut sent_sorted = hist.sent.clone().into_iter().collect::<Vec<_>>();
-                sent_sorted.sort_unstable_by_key(|s| s.1 .0.payment.nonce);
-                for (h, (tx, ztxs)) in sent_sorted {
-                    if tx.payment.nonce > curr_nonce {
-                        println!(
-                            "Sending rewards for block #{} (Nonce: {})...",
-                            h.number, tx.payment.nonce
-                        );
-                        ctx.client.transact_deposit(tx.clone())?;
-                        for ztx in ztxs {
-                            ctx.client.transact_zero(ztx.clone())?;
-                        }
-                    } else {
-                        hist.sent.remove(&h);
-                        println!("Tx with nonce {} removed...", tx.payment.nonce);
-                        save_history(&hist)?;
-                    }
-                }
 
-                Ok(())
-            }() {
-                log::error!("Error: {}", e);
+                    Ok::<_, PoolError>(())
+                }
+                .await
+                {
+                    log::error!("Error: {}", e);
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             }
-            std::thread::sleep(std::time::Duration::from_secs(60));
-        })
+
+            Ok::<(), PoolError>(())
+        }
     };
+
+    // And run forever...
+    if let Err(e) = tokio::try_join!(server, puzzle_getter, reward_sender) {
+        eprintln!("error: {}", e);
+    }
+
+    Ok(())
+}
+
+/*fn main() {
+
+
+    let server = Server::http().unwrap();
+
 
     for request in server.incoming_requests() {
         if let Err(e) = process_request(context.clone(), request, &opt) {
@@ -574,4 +679,4 @@ fn main() {
 
     puzzle_getter.join().unwrap();
     reward_sender.join().unwrap();
-}
+}*/
