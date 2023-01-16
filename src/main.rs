@@ -1,6 +1,6 @@
 mod client;
 
-use bazuka::core::{Header, Money, MpnAddress, MpnDeposit};
+use bazuka::core::{Amount, Header, Money, MpnAddress, MpnDeposit};
 use bazuka::wallet::{TxBuilder, Wallet};
 use bazuka::zk::MpnTransaction;
 use chrono::prelude::*;
@@ -101,7 +101,7 @@ struct Puzzle {
     offset: usize,
     size: usize,
     target: u32,
-    reward: Money,
+    reward: Amount,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -111,7 +111,7 @@ struct PuzzleWrapper {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct History {
-    solved: HashMap<Header, HashMap<MpnAddress, Money>>,
+    solved: HashMap<Header, HashMap<MpnAddress, Amount>>,
     sent: HashMap<Header, (MpnDeposit, Vec<MpnTransaction>)>,
 }
 
@@ -151,15 +151,15 @@ struct AddMinerResponse {
 }
 
 fn job_solved(
-    total_reward: Money,
+    total_reward: Amount,
     owner_reward_ratio: f32,
     shares: &[Share],
-) -> HashMap<MpnAddress, Money> {
+) -> HashMap<MpnAddress, Amount> {
     let total_reward_64 = Into::<u64>::into(total_reward);
     let owner_reward_64 = (total_reward_64 as f64 * owner_reward_ratio as f64) as u64;
-    let per_share_reward: Money =
+    let per_share_reward: Amount =
         ((total_reward_64 - owner_reward_64) / (shares.len() as u64)).into();
-    let mut rewards: HashMap<MpnAddress, Money> = HashMap::new();
+    let mut rewards: HashMap<MpnAddress, Amount> = HashMap::new();
     for share in shares {
         *rewards.entry(share.miner.mpn_addr.clone()).or_default() += per_share_reward;
     }
@@ -293,7 +293,7 @@ async fn process_request(
             let body_bytes = hyper::body::to_bytes(body).await?;
             let sol: Solution = serde_json::from_slice(&body_bytes)?;
 
-            let mut block_solved: Option<(Header, HashMap<MpnAddress, Money>)> = None;
+            let mut block_solved: Option<(Header, HashMap<MpnAddress, Amount>)> = None;
             let hasher = Hasher::new(ctx.hasher.clone());
             if let Some(current_job) = ctx.current_job.as_mut() {
                 let easy_puzzle = {
@@ -426,7 +426,7 @@ struct MinerContext {
 
 fn create_tx(
     wallet: &mut Wallet,
-    entries: HashMap<MpnAddress, Money>,
+    entries: HashMap<MpnAddress, Amount>,
     remote_nonce: u32,
     remote_mpn_nonce: u64,
     pool_mpn_address: MpnAddress,
@@ -446,10 +446,8 @@ fn create_tx(
         pool_mpn_address.clone(),
         0,
         new_nonce,
-        bazuka::core::TokenId::Ziesha,
-        sum_all.into(),
-        bazuka::core::TokenId::Ziesha,
-        0.into(),
+        Money::ziesha(sum_all),
+        Money::ziesha(0),
     );
     wallet.add_deposit(tx.clone());
     let mut ztxs = Vec::new();
@@ -459,11 +457,9 @@ fn create_tx(
             0,
             addr.clone(),
             0,
-            bazuka::core::TokenId::Ziesha,
-            *mon,
+            Money::ziesha((*mon).into()),
             0,
-            bazuka::core::TokenId::Ziesha,
-            0.into(),
+            Money::ziesha(0),
             new_mpn_nonce + i as u64,
         );
         wallet.add_zsend(tx.clone());
