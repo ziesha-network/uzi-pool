@@ -426,6 +426,7 @@ struct MinerContext {
 
 fn create_tx(
     wallet: &mut Wallet,
+    memo: String,
     entries: HashMap<MpnAddress, Amount>,
     remote_nonce: u32,
     remote_mpn_nonce: u64,
@@ -442,6 +443,7 @@ fn create_tx(
         .map(|(_, m)| Into::<u64>::into(*m))
         .sum::<u64>();
     let tx = tx_builder.deposit_mpn(
+        memo,
         mpn_id,
         pool_mpn_address.clone(),
         0,
@@ -612,6 +614,7 @@ async fn main() -> Result<(), ()> {
                                 if actual_header == h {
                                     let (tx, ztxs) = create_tx(
                                         &mut wallet,
+                                        format!("Pool-Reward, block #{}", h.number).into(),
                                         entries,
                                         curr_nonce,
                                         curr_mpn_nonce,
