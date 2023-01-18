@@ -632,7 +632,8 @@ async fn main() -> Result<(), ()> {
                     let mut sent_sorted = hist.sent.clone().into_iter().collect::<Vec<_>>();
                     sent_sorted.sort_unstable_by_key(|s| s.1 .0.payment.nonce);
                     for (h, (tx, ztxs)) in sent_sorted {
-                        if tx.payment.nonce > curr_nonce {
+                        let last_ztx = ztxs.iter().last().unwrap();
+                        if tx.payment.nonce > curr_nonce || last_ztx.nonce >= curr_mpn_nonce {
                             println!(
                                 "Sending rewards for block #{} (Nonce: {})...",
                                 h.number, tx.payment.nonce
