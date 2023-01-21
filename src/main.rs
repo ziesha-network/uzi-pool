@@ -435,7 +435,7 @@ fn create_tx(
         pub_key: tx_builder.get_zk_address(),
     };
     let new_mpn_nonce = wallet
-        .new_z_nonce(pool_mpn_address.account_index())
+        .new_z_nonce(&pool_mpn_address)
         .unwrap_or(remote_mpn_nonce);
     let sum_all = entries
         .iter()
@@ -586,6 +586,9 @@ async fn main() -> Result<(), ()> {
                 let ctx = Arc::clone(&ctx);
                 let opt = opt.clone();
                 if let Err(e) = async move {
+                    let mpn_log4_acc_cap = bazuka::config::blockchain::get_blockchain_config()
+                        .mpn_log4_account_capacity;
+
                     let mut ctx = ctx.write().await;
                     ctx.eligible_miners = get_miners()?;
                     let mut hist = get_history()?;
@@ -603,7 +606,7 @@ async fn main() -> Result<(), ()> {
                         .nonce;
                     let curr_mpn_nonce = ctx
                         .client
-                        .get_mpn_account(pool_mpn_address.account_index())
+                        .get_mpn_account(pool_mpn_address.account_index(mpn_log4_acc_cap))
                         .await?
                         .account
                         .nonce;
