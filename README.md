@@ -25,6 +25,13 @@ cd uzi-pool
 cargo install --path .
 ```
 
+Remove the old history and pool wallet:
+
+```
+rm -rf ~/.uzi-pool-history
+rm -rf ~/.uzi-pool-miners
+```
+
 Now run it:
 
 ```
@@ -42,7 +49,7 @@ Rewards are given with a delay of 5 blocks (Which is tunable with `--reward-dela
 Uzi-Pool will listen to port 8766 for requests, you can add a miner by sending a POST request to `127.0.0.1:8766/add-miner`, containing the wallet address of the new member, e.g:
 
 ```
-curl -X POST 127.0.0.1:8766/add-miner -d '{"pub_key":"WALLET ADDRESS OF MEMBER"}'
+curl -X POST 127.0.0.1:8766/add-miner -d '{"mpn_addr":"MPN ADDRESS OF MEMBER"}'
 ```
 
 The response will be a JSON message containing a Miner-token which should be used by the miner when running Uzi-Miner.
