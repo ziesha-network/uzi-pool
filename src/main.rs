@@ -643,7 +643,6 @@ async fn main() -> Result<(), ()> {
                                 ctx.client.transact_zero(ztx.clone()).await?;
                             }
                         } else {
-                            hist.sent.remove(&h);
                             println!("Tx with nonce {} removed...", tx.payment.nonce);
                             save_history(&hist)?;
                         }
