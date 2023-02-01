@@ -1,6 +1,6 @@
 mod client;
 
-use bazuka::core::{Amount, Header, Money, MpnAddress, MpnDeposit};
+use bazuka::core::{Amount, ChainSourcedTx, Header, Money, MpnAddress, MpnDeposit, MpnSourcedTx};
 use bazuka::wallet::{TxBuilder, Wallet};
 use bazuka::zk::MpnTransaction;
 use chrono::prelude::*;
@@ -632,22 +632,32 @@ async fn main() -> Result<(), ()> {
                         }
                     }
                     println!("Current nonce: {}", curr_nonce);
-                    let mut sent_sorted = hist.sent.clone().into_iter().collect::<Vec<_>>();
-                    sent_sorted.sort_unstable_by_key(|s| s.1 .0.payment.nonce);
-                    for (h, (tx, ztxs)) in sent_sorted {
-                        let last_ztx = ztxs.iter().last().unwrap();
-                        if tx.payment.nonce > curr_nonce || last_ztx.nonce >= curr_mpn_nonce {
-                            println!(
-                                "Sending rewards for block #{} (Nonce: {})...",
-                                h.number, tx.payment.nonce
-                            );
-                            ctx.client.transact_deposit(tx.clone()).await?;
-                            for ztx in ztxs {
-                                ctx.client.transact_zero(ztx.clone()).await?;
+
+                    println!("Resending unprocessed transactions...");
+                    for tx in wallet.chain_sourced_txs.iter() {
+                        if tx.nonce() > curr_nonce {
+                            match tx {
+                                ChainSourcedTx::MpnDeposit(tx) => {
+                                    ctx.client.transact_deposit(tx.clone()).await?;
+                                }
+                                _ => {}
                             }
-                        } else {
-                            println!("Tx with nonce {} removed...", tx.payment.nonce);
-                            save_history(&hist)?;
+                        }
+                    }
+                    for tx in wallet
+                        .mpn_sourced_txs
+                        .get(&pool_mpn_address)
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                    {
+                        if tx.nonce() >= curr_mpn_nonce {
+                            match tx {
+                                MpnSourcedTx::MpnTransaction(tx) => {
+                                    ctx.client.transact_zero(tx.clone()).await?;
+                                }
+                                _ => {}
+                            }
                         }
                     }
 
