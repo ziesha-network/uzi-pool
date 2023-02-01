@@ -76,9 +76,6 @@ struct Opt {
 
     #[structopt(long, default_value = "0.01")]
     owner_reward_ratio: f32,
-
-    #[structopt(long)]
-    pool_mpn_address: MpnAddress,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -430,13 +427,15 @@ fn create_tx(
     entries: HashMap<MpnAddress, Amount>,
     remote_nonce: u32,
     remote_mpn_nonce: u64,
-    pool_mpn_address: MpnAddress,
 ) -> Result<(bazuka::core::MpnDeposit, Vec<MpnTransaction>), PoolError> {
     let mpn_id = bazuka::config::blockchain::get_blockchain_config().mpn_contract_id;
     let tx_builder = TxBuilder::new(&wallet.seed());
     let new_nonce = wallet.new_r_nonce().unwrap_or(remote_nonce + 1);
+    let pool_mpn_address = MpnAddress {
+        pub_key: tx_builder.get_zk_address(),
+    };
     let new_mpn_nonce = wallet
-        .new_z_nonce(pool_mpn_address.account_index)
+        .new_z_nonce(&pool_mpn_address)
         .unwrap_or(remote_mpn_nonce);
     let sum_all = entries
         .iter()
@@ -455,7 +454,6 @@ fn create_tx(
     let mut ztxs = Vec::new();
     for (i, (addr, mon)) in entries.iter().enumerate() {
         let tx = tx_builder.create_mpn_transaction(
-            pool_mpn_address.account_index,
             0,
             addr.clone(),
             0,
@@ -588,12 +586,18 @@ async fn main() -> Result<(), ()> {
                 let ctx = Arc::clone(&ctx);
                 let opt = opt.clone();
                 if let Err(e) = async move {
+                    let mpn_log4_acc_cap = bazuka::config::blockchain::get_blockchain_config()
+                        .mpn_log4_account_capacity;
+
                     let mut ctx = ctx.write().await;
                     ctx.eligible_miners = get_miners()?;
                     let mut hist = get_history()?;
                     let curr_height = ctx.client.get_height().await?;
                     let wallet_path = home::home_dir().unwrap().join(Path::new(".bazuka-wallet"));
                     let mut wallet = Wallet::open(wallet_path.clone()).unwrap().unwrap();
+                    let pool_mpn_address = MpnAddress {
+                        pub_key: TxBuilder::new(&wallet.seed()).get_zk_address(),
+                    };
                     let curr_nonce = ctx
                         .client
                         .get_account(TxBuilder::new(&wallet.seed()).get_address())
@@ -602,7 +606,7 @@ async fn main() -> Result<(), ()> {
                         .nonce;
                     let curr_mpn_nonce = ctx
                         .client
-                        .get_mpn_account(opt.pool_mpn_address.account_index)
+                        .get_mpn_account(pool_mpn_address.account_index(mpn_log4_acc_cap))
                         .await?
                         .account
                         .nonce;
@@ -618,7 +622,6 @@ async fn main() -> Result<(), ()> {
                                         entries,
                                         curr_nonce,
                                         curr_mpn_nonce,
-                                        opt.pool_mpn_address.clone(),
                                     )?;
                                     wallet.save(wallet_path.clone()).unwrap();
                                     println!("Tx with nonce {} created...", tx.payment.nonce);
